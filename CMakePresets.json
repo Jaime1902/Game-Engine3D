@@ -20,12 +20,14 @@
     {
       "name": "windows-dev",
       "configurePreset": "windows-dev",
-      "configuration": "Debug"
+      "configuration": "Debug",
+      "nativeToolOptions": ["/p:TrackFileAccess=false"]
     },
     {
       "name": "windows-vulkan",
       "configurePreset": "windows-vulkan",
-      "configuration": "Debug"
+      "configuration": "Debug",
+      "nativeToolOptions": ["/p:TrackFileAccess=false"]
     }
   ],
   "testPresets": [
