@@ -1,0 +1,41 @@
+{
+  "version": 5,
+  "configurePresets": [
+    {
+      "name": "windows-dev",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/out/build/${presetName}"
+    },
+    {
+      "name": "windows-vulkan",
+      "inherits": "windows-dev",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "GE3D_ENABLE_VULKAN": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "windows-dev",
+      "configurePreset": "windows-dev",
+      "configuration": "Debug"
+    },
+    {
+      "name": "windows-vulkan",
+      "configurePreset": "windows-vulkan",
+      "configuration": "Debug"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "windows-dev",
+      "configurePreset": "windows-dev",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

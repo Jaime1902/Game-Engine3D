@@ -1,0 +1,5 @@
+add_executable(ge3d_runtime_tests runtime_tests.cpp)
+target_link_libraries(ge3d_runtime_tests PRIVATE ge3d::runtime)
+add_test(NAME runtime_baseline COMMAND ge3d_runtime_tests)
+add_test(NAME editor_bootstrap COMMAND ge3d_editor)
+add_test(NAME player_bootstrap COMMAND ge3d_player)

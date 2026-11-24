@@ -1,0 +1,5 @@
+/out/
+/.cache/
+/projects/*/.cache/
+CMakeUserPresets.json
+.vs/
