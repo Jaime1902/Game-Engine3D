@@ -14,6 +14,13 @@ const std::vector<Entity>& Scene::entities() const noexcept {
     return entities_;
 }
 
+Entity* Scene::find(EntityId id) noexcept {
+    for (auto& entity : entities_) {
+        if (entity.id == id) return &entity;
+    }
+    return nullptr;
+}
+
 Scene makeStarterScene() {
     Scene scene;
     scene.create("Floor", Primitive::box, {{0, -0.25f, 0}, {}, {8, 0.5f, 8}});

@@ -12,7 +12,8 @@
       "inherits": "windows-dev",
       "binaryDir": "${sourceDir}/out/build/${presetName}",
       "cacheVariables": {
-        "GE3D_ENABLE_VULKAN": "ON"
+        "GE3D_ENABLE_VULKAN": "ON",
+        "GE3D_BUILD_VULKAN_EDITOR": "ON"
       }
     }
   ],

@@ -4,7 +4,7 @@ Motor de escritorio para construir, programar y jugar escenas 3D pixel art desde
 
 ## Estado del repositorio
 
-La base C++ contiene escenas en memoria, una escena de arranque y generación de malla para caja y rampa con identificadores de cara. Los ejecutables de editor y jugador son de consola. El sondeo Vulkan es opcional y consulta la versión del cargador. El viewport gráfico, el guardado de escenas, Luau, Slang, Jolt y miniaudio tienen diseños de integración y quedan pendientes de implementación.
+La base C++ contiene escenas en memoria y genera mallas de caja y rampa. El preset Vulkan habilita un editor gráfico con jerarquía, inspector y viewport pixel art. El jugador de consola permite comprobar el arranque del runtime. El guardado de escenas, los scripts Luau, la física y el audio corresponden a etapas posteriores.
 
 ## Compilación
 
@@ -18,15 +18,18 @@ ctest --preset windows-dev
 .\out\build\windows-dev\apps\player\Debug\ge3d_player.exe
 ```
 
-Para el diagnóstico gráfico instala también Vulkan SDK 1.3 o superior y abre una terminal nueva.
+Para compilar el editor gráfico instala un Vulkan SDK con `slangc` y abre una terminal nueva. La primera configuración descarga las dependencias gráficas.
 
 ```powershell
 cmake --preset windows-vulkan
 cmake --build --preset windows-vulkan
 .\out\build\windows-vulkan\tools\Debug\ge3d_vulkan_probe.exe
+.\out\build\windows-vulkan\apps\vulkan-editor\Debug\ge3d_vulkan_editor.exe
 ```
 
-El diagnóstico indica la versión del cargador. El futuro backend comprobará aparte la GPU, las características y la presentación de superficies.
+El diagnóstico indica la versión del cargador. El editor requiere una GPU con Vulkan 1.3, dynamic rendering y synchronization2.
+
+Haz clic en un objeto de la escena o en la jerarquía para seleccionarlo. Usa **W**, **E** y **R** para mover, rotar y escalar, y **F** para encuadrar la selección. La rueda acerca la cámara, el botón derecho orbita y el botón central desplaza la vista. El inspector edita la transformación directamente. **Ajuste** activa incrementos en el gizmo.
 
 ## Documentación
 

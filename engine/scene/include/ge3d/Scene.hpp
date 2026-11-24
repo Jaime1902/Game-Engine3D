@@ -33,6 +33,7 @@ class Scene {
 public:
     EntityId create(std::string name, Primitive primitive, Transform transform = {});
     [[nodiscard]] const std::vector<Entity>& entities() const noexcept;
+    [[nodiscard]] Entity* find(EntityId id) noexcept;
 
 private:
     std::vector<Entity> entities_;
