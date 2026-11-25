@@ -37,12 +37,13 @@ El editor requiere una GPU con Vulkan 1.3, dynamic rendering y synchronization2.
 | **Proyecto** (abajo) | Archivos de `projects/pueblo/Content`. Doble clic en una escena para abrirla |
 | **Consola** (abajo) | Mensajes del editor y de Vulkan, con filtros por tipo |
 
-La barra superior tiene las herramientas **Mano (Q)**, **Mover (W)**, **Rotar (E)**, **Escalar (R)** y **Pintar (B)**, el cambio de ejes Global o Local y **Ajuste**, que mueve en pasos de 0,25 y rota en pasos de 15°. Con Pintar, la paleta de 24 colores aparece en la barra de la vista y la cara bajo el cursor se resalta con el color elegido. Todo un trazo se deshace de una vez. Las caras guardan un índice de la paleta (`engine/scene/include/ge3d/Palette.hpp`), así que cambiar un color de la paleta recolorea toda la escena. En el centro están **Play**, **Pausa** y **Paso**. En Play el editor se tiñe de azul, y al detener se descartan los cambios hechos durante el juego. La simulación llegará con las etapas 3 y 4.
+La barra superior tiene las herramientas **Mano (Q)**, **Mover (W)**, **Rotar (E)**, **Escalar (R)**, **Pintar (B)** y **Construir (C)**, el cambio de ejes Global o Local y **Ajuste**, que mueve en pasos de 0,25 y rota en pasos de 15°. Con Pintar, la paleta de 24 colores aparece en la barra de la vista y la cara bajo el cursor se resalta con el color elegido. Todo un trazo se deshace de una vez. Con Construir se colocan bloques o rampas en una cuadrícula de 0,5, 1 o 2 m: sobre el suelo o pegados a la cara de otra pieza, con el color elegido de la paleta. Las celdas ocupadas se marcan en rojo y se saltan. Las caras guardan un índice de la paleta (`engine/scene/include/ge3d/Palette.hpp`), así que cambiar un color de la paleta recolorea toda la escena. En el centro están **Play**, **Pausa** y **Paso**. En Play el editor se tiñe de azul, y al detener se descartan los cambios hechos durante el juego. La simulación llegará con las etapas 3 y 4.
 
 | Acción | Atajo |
 |---|---|
 | Orbitar / desplazar / acercar | Clic derecho o Alt + clic izquierdo / botón central / rueda |
 | Pintar (herramienta B) | Clic o arrastre: la cara bajo el cursor · Shift + clic: toda la pieza · Ctrl + clic: tomar el color |
+| Construir (herramienta C) | Clic: una pieza en la celda · Arrastre: trazo · Shift + arrastre: rectángulo · Ctrl + arrastre: borrar · Espacio: girar 90° |
 | Enfocar selección | **F** |
 | Duplicar / eliminar | **Ctrl+D** / **Supr** |
 | Deshacer / rehacer | **Ctrl+Z** / **Ctrl+Y** |

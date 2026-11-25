@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <functional>
 #include <cmath>
 #include <cstdio>
 #include <limits>
@@ -127,7 +128,7 @@ ImFont* loadFonts(float scale, ImFont*& bold) {
 }
 
 // --- Iconos dibujados con primitivas (la fuente no trae iconos) -------------------------------
-enum class Icon { hand, move, rotate, scale, paint, play, pause, step, cube, ramp, folder, file, scene };
+enum class Icon { hand, move, rotate, scale, paint, build, play, pause, step, cube, ramp, folder, file, scene };
 
 void drawIcon(ImDrawList* draw, Icon icon, ImVec2 center, float r, ImU32 color) {
     const float t = std::max(1.0f, r * 0.17f);
@@ -167,6 +168,12 @@ void drawIcon(ImDrawList* draw, Icon icon, ImVec2 center, float r, ImU32 color) 
         draw->AddLine(p(0.85f, -0.85f), p(0.05f, -0.05f), color, t * 1.6f);
         draw->AddQuadFilled(p(0.12f, -0.32f), p(0.32f, -0.12f), p(-0.05f, 0.25f), p(-0.25f, 0.05f), color);
         draw->AddTriangleFilled(p(-0.25f, 0.05f), p(-0.05f, 0.25f), p(-0.85f, 0.85f), color);
+        break;
+    case Icon::build:
+        // Tres bloques apilados.
+        draw->AddRectFilled(p(-0.9f, 0.1f), p(-0.05f, 0.9f), color, r * 0.08f);
+        draw->AddRectFilled(p(0.05f, 0.1f), p(0.9f, 0.9f), color, r * 0.08f);
+        draw->AddRectFilled(p(-0.42f, -0.85f), p(0.42f, -0.05f), color, r * 0.08f);
         break;
     case Icon::play:
         draw->AddTriangleFilled(p(-0.55f, -0.8f), p(0.8f, 0), p(-0.55f, 0.8f), color);
@@ -464,14 +471,18 @@ const ge3d::Mesh& meshOf(ge3d::Primitive primitive) {
 }
 }
 
-std::optional<EditorView::Hit> EditorView::raycast(ImVec2 mouse, ImVec2 origin, ImVec2 size) const {
+EditorView::Ray EditorView::mouseRay(ImVec2 mouse, ImVec2 origin, ImVec2 size) const {
     const auto inverse = glm::inverse(projection() * view());
     const float x = (mouse.x - origin.x) / size.x * 2 - 1;
     const float y = 1 - (mouse.y - origin.y) / size.y * 2;
     const auto near = inverse * glm::vec4(x, y, -1, 1);
     const auto far = inverse * glm::vec4(x, y, 1, 1);
     const auto start = glm::vec3(near) / near.w;
-    const auto direction = glm::normalize(glm::vec3(far) / far.w - start);
+    return {start, glm::normalize(glm::vec3(far) / far.w - start)};
+}
+
+std::optional<EditorView::Hit> EditorView::raycast(ImVec2 mouse, ImVec2 origin, ImVec2 size) const {
+    const auto ray = mouseRay(mouse, origin, size);
     std::optional<Hit> best;
     for (const auto& entity : scene_.entities()) {
         const auto model = modelMatrix(entity.transform);
@@ -480,9 +491,15 @@ std::optional<EditorView::Hit> EditorView::raycast(ImVec2 mouse, ImVec2 origin, 
             const auto point = [&](std::uint32_t index) {
                 return glm::vec3(model * glm::vec4(vector(mesh.positions[index]), 1));
             };
-            const auto& indices = triangle.indices;
-            const auto distance = hitTriangle(start, direction, point(indices[0]), point(indices[1]), point(indices[2]));
-            if (distance >= 0 && (!best || distance < best->distance)) best = Hit{entity.id, triangle.face, distance};
+            const auto a = point(triangle.indices[0]);
+            const auto b = point(triangle.indices[1]);
+            const auto c = point(triangle.indices[2]);
+            const auto distance = hitTriangle(ray.start, ray.direction, a, b, c);
+            if (distance >= 0 && (!best || distance < best->distance)) {
+                auto normal = glm::normalize(glm::cross(b - a, c - a));
+                if (glm::dot(normal, ray.direction) > 0) normal = -normal;  // hacia la cámara
+                best = Hit{entity.id, triangle.face, distance, ray.start + ray.direction * distance, normal};
+            }
         }
     }
     return best;
@@ -493,15 +510,11 @@ void EditorView::pick(ImVec2 mouse, ImVec2 origin, ImVec2 size) {
     selected_ = hit ? hit->entity : 0;
 }
 
-void EditorView::drawFacePreview(ImDrawList* draw, const Hit& hit, ImVec2 origin, ImVec2 size, bool wholePiece) const {
-    const auto* entity = scene_.find(hit.entity);
-    if (!entity) return;
-    const auto matrix = projection() * view() * modelMatrix(entity->transform);
-    const auto& mesh = meshOf(entity->primitive);
-    auto fill = paletteColor(paintColor_);
-    fill.w = 0.4f;
-    const ImU32 fillColor = ImGui::GetColorU32(fill);
-    const ImU32 lineColor = IM_COL32(255, 255, 255, 220);
+void EditorView::drawPieceOutline(ImDrawList* draw, ge3d::Primitive primitive, const glm::mat4& model, ImVec2 origin,
+                                  ImVec2 size, ImU32 lineColor, ImU32 fillColor, int face) const {
+    const auto matrix = projection() * view() * model;
+    const auto& mesh = meshOf(primitive);
+    const bool wholePiece = face < 0;
     const auto project = [&](std::uint32_t index, ImVec2& out) {
         const auto clip = matrix * glm::vec4(vector(mesh.positions[index]), 1);
         if (clip.w <= 0.001f) return false;
@@ -509,28 +522,186 @@ void EditorView::drawFacePreview(ImDrawList* draw, const Hit& hit, ImVec2 origin
         out = {origin.x + (ndc.x * 0.5f + 0.5f) * size.x, origin.y + (0.5f - ndc.y * 0.5f) * size.y};
         return true;
     };
-    // Se rellenan los triángulos de la cara y se perfilan solo sus bordes exteriores
-    // (las aristas que aparecen una sola vez), sin la diagonal interna.
-    std::map<std::pair<std::uint32_t, std::uint32_t>, int> edges;
+    // Se rellenan los triángulos y se perfilan solo los bordes de cada cara (las aristas que
+    // aparecen una vez dentro de su cara), sin las diagonales internas.
+    std::map<std::tuple<std::uint32_t, std::uint32_t, std::uint32_t>, int> edges;
     for (const auto& triangle : mesh.triangles) {
-        if (!wholePiece && triangle.face != hit.face) continue;
+        if (!wholePiece && triangle.face != static_cast<std::uint32_t>(face)) continue;
         ImVec2 points[3];
         bool visible = true;
         for (std::size_t i = 0; i < 3; ++i) visible = visible && project(triangle.indices[i], points[i]);
         if (!visible) continue;
-        draw->AddTriangleFilled(points[0], points[1], points[2], fillColor);
+        if (fillColor & IM_COL32_A_MASK) draw->AddTriangleFilled(points[0], points[1], points[2], fillColor);
         for (std::size_t i = 0; i < 3; ++i) {
             const auto a = triangle.indices[i];
             const auto b = triangle.indices[(i + 1) % 3];
-            ++edges[{std::min(a, b), std::max(a, b)}];
+            ++edges[{triangle.face, std::min(a, b), std::max(a, b)}];
         }
     }
     for (const auto& [edge, count] : edges) {
         ImVec2 a, b;
-        if ((count == 1 || wholePiece) && project(edge.first, a) && project(edge.second, b)) {
+        if (count == 1 && project(std::get<1>(edge), a) && project(std::get<2>(edge), b)) {
             draw->AddLine(a, b, lineColor, 1.5f);
         }
     }
+}
+
+// --- Construcción ------------------------------------------------------------------------------
+
+std::optional<EditorView::Cell> EditorView::buildCellAt(ImVec2 mouse, ImVec2 origin, ImVec2 size) const {
+    // Contra una pieza: la celda vecina a la cara apuntada. Si no, contra el suelo (y = 0).
+    glm::vec3 point{};
+    glm::vec3 normal{0, 1, 0};
+    const auto ray = mouseRay(mouse, origin, size);
+    const float groundDistance = ray.direction.y < -1e-4f ? -ray.start.y / ray.direction.y : -1.0f;
+    const auto hit = raycast(mouse, origin, size);
+    if (hit && (groundDistance < 0 || hit->distance <= groundDistance)) {
+        point = hit->point;
+        normal = hit->normal;
+    } else if (groundDistance > 0 && groundDistance < farPlane) {
+        point = ray.start + ray.direction * groundDistance;
+    } else {
+        return std::nullopt;
+    }
+    const glm::vec3 target = point + normal * (buildCell_ * 0.5f);
+    const glm::ivec3 cell = glm::ivec3(glm::floor(target / buildCell_));
+    return Cell{cell.x, cell.y, cell.z};
+}
+
+ge3d::Transform EditorView::cellTransform(const Cell& cell) const {
+    const auto [x, y, z] = cell;
+    ge3d::Transform transform;
+    transform.position = {(static_cast<float>(x) + 0.5f) * buildCell_, (static_cast<float>(y) + 0.5f) * buildCell_,
+                          (static_cast<float>(z) + 0.5f) * buildCell_};
+    transform.rotationDegrees = {0, static_cast<float>(buildRotation_ * 90), 0};
+    transform.scale = {buildCell_, buildCell_, buildCell_};
+    return transform;
+}
+
+bool EditorView::cellOccupied(const Cell& cell) const {
+    const auto center = cellTransform(cell).position;
+    const float tolerance = buildCell_ * 0.25f;
+    return std::any_of(scene_.entities().begin(), scene_.entities().end(), [&](const ge3d::Entity& entity) {
+        const auto& p = entity.transform.position;
+        return std::abs(p.x - center.x) < tolerance && std::abs(p.y - center.y) < tolerance &&
+               std::abs(p.z - center.z) < tolerance;
+    });
+}
+
+std::vector<EditorView::Cell> EditorView::pendingCells() const {
+    std::vector<Cell> cells;
+    if (!building_) return cells;
+    if (buildRect_) {
+        // Rectángulo en la capa (altura) donde empezó el trazo.
+        const auto [x0, y0, z0] = buildStart_;
+        const auto [x1, y1, z1] = buildCurrent_;
+        (void)y1;
+        constexpr int limit = 64;
+        for (int x = std::min(x0, x1); x <= std::max(x0, x1) && x - std::min(x0, x1) < limit; ++x) {
+            for (int z = std::min(z0, z1); z <= std::max(z0, z1) && z - std::min(z0, z1) < limit; ++z) {
+                cells.emplace_back(x, y0, z);
+            }
+        }
+    } else {
+        cells.assign(buildStroke_.begin(), buildStroke_.end());
+    }
+    cells.erase(std::remove_if(cells.begin(), cells.end(), [&](const Cell& cell) { return cellOccupied(cell); }),
+                cells.end());
+    return cells;
+}
+
+void EditorView::handleBuildTool(ImDrawList* draw, ImVec2 origin, ImVec2 size, bool canUseMouse) {
+    const auto& io = ImGui::GetIO();
+    const ImU32 white = IM_COL32(255, 255, 255, 230);
+    const ImU32 red = IM_COL32(255, 90, 80, 240);
+    auto ghost = paletteColor(paintColor_);
+    ghost.w = 0.45f;
+    const ImU32 ghostFill = ImGui::GetColorU32(ghost);
+
+    // Borrar (Ctrl): marca en rojo las piezas tocadas y las elimina al soltar.
+    if (erasing_ || (canUseMouse && io.KeyCtrl && !building_)) {
+        const auto hit = canUseMouse ? raycast(io.MousePos, origin, size) : std::nullopt;
+        if (canUseMouse && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) erasing_ = true;
+        if (erasing_ && hit && ImGui::IsMouseDown(ImGuiMouseButton_Left)) eraseStroke_.insert(hit->entity);
+        for (const auto id : eraseStroke_) {
+            if (const auto* entity = scene_.find(id)) {
+                drawPieceOutline(draw, entity->primitive, modelMatrix(entity->transform), origin, size, red,
+                                 IM_COL32(255, 60, 50, 90));
+            }
+        }
+        if (hit && !eraseStroke_.contains(hit->entity)) {
+            if (const auto* entity = scene_.find(hit->entity)) {
+                drawPieceOutline(draw, entity->primitive, modelMatrix(entity->transform), origin, size, red, 0);
+            }
+        }
+        return;
+    }
+
+    // Colocar: clic = una pieza, arrastre = trazo, Shift + arrastre = rectángulo.
+    const auto cell = canUseMouse || building_ ? buildCellAt(io.MousePos, origin, size) : std::nullopt;
+    if (canUseMouse && cell && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        building_ = true;
+        buildRect_ = io.KeyShift;
+        buildStart_ = *cell;
+        buildStroke_.clear();
+    }
+    if (building_ && cell && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        if (buildRect_) {
+            // El rectángulo se mantiene en la capa inicial aunque el cursor pase sobre otras piezas.
+            buildCurrent_ = {std::get<0>(*cell), std::get<1>(buildStart_), std::get<2>(*cell)};
+        } else {
+            buildStroke_.insert(*cell);
+        }
+    }
+
+    if (building_) {
+        for (const auto& pending : pendingCells()) {
+            drawPieceOutline(draw, buildShape_, modelMatrix(cellTransform(pending)), origin, size, white, ghostFill);
+        }
+    } else if (cell && canUseMouse) {
+        const bool occupied = cellOccupied(*cell);
+        drawPieceOutline(draw, buildShape_, modelMatrix(cellTransform(*cell)), origin, size,
+                         occupied ? red : white, occupied ? 0 : ghostFill);
+    }
+}
+
+void EditorView::finishBuildStroke() {
+    const auto cells = pendingCells();
+    building_ = false;
+    buildStroke_.clear();
+    if (cells.empty()) return;
+    // Todas las piezas del trazo se crean (y se deshacen) en una sola operación.
+    const bool box = buildShape_ == ge3d::Primitive::box;
+    const std::string prefix = box ? "Bloque " : "Rampa ";
+    auto count = std::count_if(scene_.entities().begin(), scene_.entities().end(),
+                               [&](const ge3d::Entity& entity) { return entity.name.starts_with(prefix); });
+    ge3d::EditCommand command;
+    command.label = cells.size() == 1 ? (box ? "Colocar bloque" : "Colocar rampa")
+                                      : "Construir " + std::to_string(cells.size()) + " piezas";
+    std::size_t index = scene_.entities().size();
+    for (const auto& cell : cells) {
+        auto entity = scene_.makeEntity(prefix + std::to_string(++count), buildShape_, cellTransform(cell));
+        entity.faces.fill(paintColor_);
+        command.changes.push_back({std::nullopt, std::move(entity), index++});
+    }
+    execute(std::move(command));
+}
+
+void EditorView::finishEraseStroke() {
+    erasing_ = false;
+    if (eraseStroke_.empty()) return;
+    // Se borran de la posición más alta a la más baja: así los índices guardados siguen siendo válidos
+    // al deshacer (se reinsertan en orden inverso).
+    std::vector<std::pair<std::size_t, ge3d::EntityId>> targets;
+    for (const auto id : eraseStroke_) {
+        if (const auto index = scene_.indexOf(id)) targets.emplace_back(*index, id);
+    }
+    eraseStroke_.clear();
+    std::sort(targets.begin(), targets.end(), std::greater<>());
+    ge3d::EditCommand command;
+    command.label = targets.size() == 1 ? "Borrar pieza" : "Borrar " + std::to_string(targets.size()) + " piezas";
+    for (const auto& [index, id] : targets) command.changes.push_back({*scene_.find(id), std::nullopt, index});
+    execute(std::move(command));
 }
 
 void EditorView::paintAt(const Hit& hit, bool wholePiece) {
@@ -801,6 +972,8 @@ void EditorView::handleShortcuts() {
         if (ImGui::Shortcut(ImGuiKey_E, once)) tool_ = Tool::rotate;
         if (ImGui::Shortcut(ImGuiKey_R, once)) tool_ = Tool::scale;
         if (ImGui::Shortcut(ImGuiKey_B, once)) tool_ = Tool::paint;
+        if (ImGui::Shortcut(ImGuiKey_C, once)) tool_ = Tool::build;
+        if (tool_ == Tool::build && ImGui::Shortcut(ImGuiKey_Space, once)) buildRotation_ = (buildRotation_ + 1) % 4;
         if (ImGui::Shortcut(ImGuiKey_F, once)) focusSelection();
     }
 }
@@ -880,6 +1053,9 @@ void EditorView::drawToolbar() {
             {Tool::scale, Icon::scale, "##escalar", "Escalar (R)"},
             {Tool::paint, Icon::paint, "##pintar", "Pintar caras (B)\nClic o arrastre: pinta la cara\n"
                                                    "Shift+clic: pinta toda la pieza\nCtrl+clic: toma el color (cuentagotas)"},
+            {Tool::build, Icon::build, "##construir", "Construir (C)\nClic: coloca una pieza en la celda\n"
+                                                      "Arrastre: coloca un trazo\nShift+arrastre: rellena un rectangulo\n"
+                                                      "Ctrl+arrastre: borra piezas\nEspacio: gira la pieza 90 grados"},
         };
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {1.0f, 0.0f});
         for (const auto& item : tools) {
@@ -1017,7 +1193,9 @@ void EditorView::drawShortcutsPopup() {
     bool open = true;
     if (!ImGui::BeginPopupModal(title, &open, ImGuiWindowFlags_AlwaysAutoResize)) return;
     static const char* rows[][2] = {
-        {"Q / W / E / R / B", "Mano, mover, rotar, escalar, pintar"},
+        {"Q / W / E / R / B / C", "Mano, mover, rotar, escalar, pintar, construir"},
+        {"Construir: arrastre", "Trazo de piezas (Shift: rectangulo, Ctrl: borrar)"},
+        {"Construir: Espacio", "Girar la pieza 90 grados"},
         {"Pintar: Shift / Ctrl + clic", "Pintar toda la pieza / tomar el color"},
         {"F", "Enfocar la seleccion"},
         {"Clic derecho + arrastrar", "Orbitar la camara (tambien Alt + clic izquierdo)"},
@@ -1243,8 +1421,27 @@ void EditorView::drawViewport(ImTextureID sceneTexture) {
             ImGui::SameLine();
             if (ImGui::Button("Enfocar")) focusSelection();
             ImGui::SetItemTooltip("Encuadrar la seleccion (F)");
-            if (tool_ == Tool::paint) {
-                // Con la herramienta Pintar, la paleta queda a mano en la barra de la vista.
+            if (tool_ == Tool::build) {
+                // Opciones del pincel de construcción.
+                ImGui::SameLine(0, 16 * scale_);
+                if (toggleButton("Bloque", buildShape_ == ge3d::Primitive::box)) buildShape_ = ge3d::Primitive::box;
+                ImGui::SameLine(0, 2);
+                if (toggleButton("Rampa", buildShape_ == ge3d::Primitive::ramp)) buildShape_ = ge3d::Primitive::ramp;
+                ImGui::SameLine();
+                char rotation[32];
+                std::snprintf(rotation, sizeof rotation, "Girar %d##girar", buildRotation_ * 90);
+                if (ImGui::Button(rotation)) buildRotation_ = (buildRotation_ + 1) % 4;
+                ImGui::SetItemTooltip("Girar la pieza 90 grados (Espacio)");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(70 * scale_);
+                static const float cells[] = {0.5f, 1.0f, 2.0f};
+                static const char* cellNames[] = {"0,5 m", "1 m", "2 m"};
+                int current = buildCell_ < 0.75f ? 0 : buildCell_ < 1.5f ? 1 : 2;
+                if (ImGui::Combo("##celda", &current, cellNames, 3)) buildCell_ = cells[current];
+                ImGui::SetItemTooltip("Tamano de la celda");
+            }
+            if (tool_ == Tool::paint || tool_ == Tool::build) {
+                // Con Pintar y Construir, la paleta queda a mano en la barra de la vista.
                 ImGui::SameLine(0, 16 * scale_);
                 ImGui::AlignTextToFramePadding();
                 ImGui::TextDisabled("Color");
@@ -1259,10 +1456,18 @@ void EditorView::drawViewport(ImTextureID sceneTexture) {
                     ImGui::PopID();
                 }
             }
+            // El texto informativo solo se muestra si cabe a la derecha sin tapar los controles.
             const char* info = "320 x 180  |  Perspectiva";
-            ImGui::SameLine(std::max(ImGui::GetCursorPosX() + 10, ImGui::GetWindowWidth() - ImGui::CalcTextSize(info).x - 10 * scale_));
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextDisabled("%s", info);
+            ImGui::SameLine();
+            const float infoWidth = ImGui::CalcTextSize(info).x;
+            const float infoX = ImGui::GetWindowWidth() - infoWidth - 10 * scale_;
+            if (infoX > ImGui::GetCursorPosX() + 10) {
+                ImGui::SetCursorPosX(infoX);
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextDisabled("%s", info);
+            } else {
+                ImGui::NewLine();
+            }
         }
         ImGui::EndChild();
         ImGui::PopStyleVar();
@@ -1354,7 +1559,15 @@ void EditorView::drawViewport(ImTextureID sceneTexture) {
             if (tool_ == Tool::paint) {
                 // Pintar: vista previa de la cara bajo el cursor, trazo con arrastre, cuentagotas con Ctrl.
                 const auto hit = canUseMouse ? raycast(io.MousePos, origin, size) : std::nullopt;
-                if (hit && !io.KeyCtrl) drawFacePreview(draw, *hit, origin, size, io.KeyShift);
+                if (hit && !io.KeyCtrl) {
+                    if (const auto* target = scene_.find(hit->entity)) {
+                        auto fill = paletteColor(paintColor_);
+                        fill.w = 0.4f;
+                        drawPieceOutline(draw, target->primitive, modelMatrix(target->transform), origin, size,
+                                         IM_COL32(255, 255, 255, 220), ImGui::GetColorU32(fill),
+                                         io.KeyShift ? -1 : static_cast<int>(hit->face));
+                    }
+                }
                 if (hit && io.KeyCtrl && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                     if (const auto* target = scene_.find(hit->entity)) {
                         paintColor_ = target->faces[hit->face];
@@ -1367,10 +1580,11 @@ void EditorView::drawViewport(ImTextureID sceneTexture) {
                     if (hit) paintAt(*hit, io.KeyShift);
                 }
             }
+            if (tool_ == Tool::build) handleBuildTool(draw, origin, size, canUseMouse);
             draw->PopClipRect();
 
-            if (canUseMouse && tool_ != Tool::hand && tool_ != Tool::paint &&
-                ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            const bool selectTool = tool_ == Tool::move || tool_ == Tool::rotate || tool_ == Tool::scale;
+            if (canUseMouse && selectTool && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                 ImGui::SetWindowFocus();
                 pick(io.MousePos, origin, size);
             }
@@ -1379,6 +1593,8 @@ void EditorView::drawViewport(ImTextureID sceneTexture) {
     }
     ImGui::End();
     if (painting_ && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) finishPaintStroke();
+    if (building_ && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) finishBuildStroke();
+    if (erasing_ && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) finishEraseStroke();
     if (gizmoEdit_ && (!ImGuizmo::IsUsing() || !ImGui::IsMouseDown(ImGuiMouseButton_Left))) {
         const char* label = tool_ == Tool::rotate ? "Rotar" : tool_ == Tool::scale ? "Escalar" : "Mover";
         commitModification(gizmoEdit_, label);

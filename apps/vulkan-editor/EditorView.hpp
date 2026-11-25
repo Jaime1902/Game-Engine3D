@@ -9,7 +9,9 @@
 #include <filesystem>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
+#include <tuple>
 #include <vector>
 
 class EditorView {
@@ -37,12 +39,20 @@ public:
     static glm::mat4 modelMatrix(const ge3d::Transform& transform);
 
 private:
-    enum class Tool { hand, move, rotate, scale, paint };
+    enum class Tool { hand, move, rotate, scale, paint, build };
     struct Hit {
         ge3d::EntityId entity{};
         std::uint32_t face{};
         float distance{};
+        glm::vec3 point{};
+        glm::vec3 normal{};
     };
+    struct Ray {
+        glm::vec3 start;
+        glm::vec3 direction;
+    };
+    // Celda de la cuadrícula de construcción, en múltiplos de buildCell_.
+    using Cell = std::tuple<int, int, int>;
     enum class SceneChange { none, newScene, open, reload, quit };
     enum class PathPopup { none, open, saveAs };
 
@@ -55,11 +65,24 @@ private:
 
     [[nodiscard]] glm::mat4 view() const;
     [[nodiscard]] glm::mat4 projection() const;
+    [[nodiscard]] Ray mouseRay(ImVec2 mouse, ImVec2 origin, ImVec2 size) const;
     [[nodiscard]] std::optional<Hit> raycast(ImVec2 mouse, ImVec2 origin, ImVec2 size) const;
     void pick(ImVec2 mouse, ImVec2 origin, ImVec2 size);
-    void drawFacePreview(ImDrawList* draw, const Hit& hit, ImVec2 origin, ImVec2 size, bool wholePiece) const;
+    // Dibuja el contorno (y opcionalmente el relleno) de una pieza proyectada en la vista.
+    // face < 0 dibuja la pieza entera; si no, solo esa cara.
+    void drawPieceOutline(ImDrawList* draw, ge3d::Primitive primitive, const glm::mat4& model, ImVec2 origin,
+                          ImVec2 size, ImU32 line, ImU32 fill, int face = -1) const;
     void paintAt(const Hit& hit, bool wholePiece);
     void finishPaintStroke();
+
+    // Construcción
+    [[nodiscard]] std::optional<Cell> buildCellAt(ImVec2 mouse, ImVec2 origin, ImVec2 size) const;
+    [[nodiscard]] ge3d::Transform cellTransform(const Cell& cell) const;
+    [[nodiscard]] bool cellOccupied(const Cell& cell) const;
+    [[nodiscard]] std::vector<Cell> pendingCells() const;
+    void handleBuildTool(ImDrawList* draw, ImVec2 origin, ImVec2 size, bool canUseMouse);
+    void finishBuildStroke();
+    void finishEraseStroke();
     void focusSelection();
     void setViewFromMatrix(const glm::mat4& view);
 
@@ -89,7 +112,7 @@ private:
     void redo();
     void validateSelection();
     [[nodiscard]] bool editInProgress() const {
-        return gizmoEdit_.has_value() || inspectorEdit_.has_value() || !paintStroke_.empty();
+        return gizmoEdit_.has_value() || inspectorEdit_.has_value() || !paintStroke_.empty() || building_ || erasing_;
     }
 
     // Escena y archivos
@@ -140,6 +163,18 @@ private:
     std::map<ge3d::EntityId, ge3d::Entity> paintStroke_;
     bool painting_ = false;
     ge3d::PaletteIndex paintColor_ = ge3d::paletteOrange;
+
+    // Pincel de construcción. El trazo se acumula y se crea al soltar, como una sola operación.
+    ge3d::Primitive buildShape_ = ge3d::Primitive::box;
+    int buildRotation_ = 0;          // giros de 90 grados alrededor de Y
+    float buildCell_ = 1.0f;         // metros por celda
+    bool building_ = false;
+    bool buildRect_ = false;         // Shift al empezar: rellenar un rectángulo
+    Cell buildStart_{};
+    Cell buildCurrent_{};
+    std::set<Cell> buildStroke_;
+    bool erasing_ = false;
+    std::set<ge3d::EntityId> eraseStroke_;
     char nameBuffer_[128]{};
     bool nameEditing_ = false;
     char pathBuffer_[512]{};
