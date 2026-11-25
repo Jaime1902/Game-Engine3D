@@ -21,10 +21,22 @@ void applyChange(Scene& scene, const EntityChange& change, bool forward) {
     }
 }
 
+void applyTerrain(Scene& scene, const TerrainChange& change, bool forward) {
+    auto* entity = scene.find(change.entity);
+    if (!entity || !entity->terrain || !entity->terrain->voxels) {
+        throw std::logic_error("History: el terreno a modificar no existe");
+    }
+    entity->terrain->voxels->setChunkData(change.chunk, forward ? change.after : change.before);
+}
+
 void apply(Scene& scene, const EditCommand& command, bool forward) {
     if (forward) {
         for (const auto& change : command.changes) applyChange(scene, change, true);
+        for (const auto& change : command.terrainChanges) applyTerrain(scene, change, true);
     } else {
+        for (auto it = command.terrainChanges.rbegin(); it != command.terrainChanges.rend(); ++it) {
+            applyTerrain(scene, *it, false);
+        }
         for (auto it = command.changes.rbegin(); it != command.changes.rend(); ++it) applyChange(scene, *it, false);
     }
 }
@@ -40,13 +52,13 @@ void History::push(EditCommand command) {
 }
 
 void History::execute(Scene& scene, EditCommand command) {
-    if (command.changes.empty()) return;
+    if (command.empty()) return;
     apply(scene, command, true);
     push(std::move(command));
 }
 
 void History::record(EditCommand command) {
-    if (command.changes.empty()) return;
+    if (command.empty()) return;
     push(std::move(command));
 }
 
@@ -96,7 +108,13 @@ std::optional<EditCommand> makeDuplicateCommand(Scene& scene, EntityId id, Vec3 
     const auto index = scene.indexOf(id);
     if (!index) return std::nullopt;
     const Entity source = scene.entities()[*index];
-    auto copy = scene.makeEntity(source.name + " copia", source.primitive, source.transform);
+    // Misma entidad con identidad nueva; el terreno duplicado recibe sus propios vóxeles.
+    auto copy = source;
+    const auto fresh = scene.makeEntity(source.name + " copia");
+    copy.id = fresh.id;
+    copy.uuid = fresh.uuid;
+    copy.name = fresh.name;
+    if (copy.terrain && copy.terrain->voxels) copy.terrain->voxels = std::make_shared<VoxelGrid>(*copy.terrain->voxels);
     copy.transform.position.x += offset.x;
     copy.transform.position.y += offset.y;
     copy.transform.position.z += offset.z;

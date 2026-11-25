@@ -3,7 +3,14 @@
 #include <vk_mem_alloc.h>
 #include "EditorLog.hpp"
 #include "EditorView.hpp"
+#include "MaterialTextures.hpp"
+#include "RenderTypes.hpp"
+#include "TerrainRenderer.hpp"
+#include "ge3d/Materials.hpp"
 #include "ge3d/Primitives.hpp"
+#include "ge3d/SceneIO.hpp"
+#include <chrono>
+#include <filesystem>
 #include <backends/imgui_impl_glfw.h>
 #include <backends/imgui_impl_vulkan.h>
 #include <ImGuizmo.h>
@@ -164,25 +171,19 @@ VkShaderModule createShaderModule(VkDevice device, const char* name) {
 }
 
 
+// Vértice de piezas y cuadrícula. Pieza: color.x = número de cara. Cuadrícula: color de la línea.
 struct Vertex {
     glm::vec3 position;
     glm::vec3 color;
+    glm::vec3 normal;
 };
 
-// Debe coincidir con ScenePush en shaders/scene.slang.
-struct ScenePush {
-    glm::mat4 transform{1.0f};
-    glm::vec4 fade{0.0f};
-    glm::vec4 grid{0.0f};
-    std::array<std::uint32_t, ge3d::maxFaces> faces{};
-};
-static_assert(sizeof(ScenePush) == 120, "ScenePush debe ocupar 120 bytes (limite garantizado: 128)");
-
-std::uint32_t packPaletteColor(ge3d::PaletteIndex index) {
-    const auto& color = ge3d::defaultPalette[index < ge3d::paletteSize ? index : 0];
-    return std::uint32_t{color.r} | (std::uint32_t{color.g} << 8) | (std::uint32_t{color.b} << 16);
+// Índices de material de las 6 caras empaquetados de dos en dos (16 bits cada uno).
+glm::uvec4 packFaceMaterials(const ge3d::ShapeComponent& shape, const MaterialTextures& textures) {
+    std::uint32_t index[6];
+    for (std::size_t face = 0; face < 6; ++face) index[face] = textures.gpuIndex(shape.materials[face]) & 0xFFFFu;
+    return {index[0] | (index[1] << 16), index[2] | (index[3] << 16), index[4] | (index[5] << 16), 0u};
 }
-constexpr VkShaderStageFlags pushStages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
 // Semiancho de la cuadrícula base en líneas. Se recoloca y se escala cada fotograma según la cámara.
 constexpr int gridHalfLines = 50;
@@ -203,20 +204,29 @@ struct SceneGeometry {
 
 SceneGeometry makeGeometry() {
     SceneGeometry geometry;
-    // Cada vértice guarda (luz de la cara, número de cara, 0). El color lo pone el shader con la paleta.
+    // Cada vértice guarda su número de cara y la normal de la cara; material, textura y luz los pone el shader.
     const auto append = [&](ge3d::Primitive primitive) {
         auto mesh = ge3d::makePrimitive(primitive);
         MeshRange range{static_cast<std::uint32_t>(geometry.indices.size()), 0};
         std::map<std::pair<std::uint32_t, std::uint32_t>, std::uint32_t> faceVertices;
-        constexpr float light[] = {0.48f, 1.0f, 0.57f, 0.82f, 0.70f, 0.88f};
+        const auto point = [&](std::uint32_t index) {
+            const auto p = mesh.positions[index];
+            return glm::vec3{p.x, p.y, p.z};
+        };
+        glm::vec3 center{0.0f};
+        for (std::uint32_t i = 0; i < mesh.positions.size(); ++i) center += point(i);
+        center /= static_cast<float>(mesh.positions.size());
         for (const auto& triangle : mesh.triangles) {
+            const auto& t = triangle.indices;
+            glm::vec3 normal = glm::normalize(glm::cross(point(t[1]) - point(t[0]), point(t[2]) - point(t[0])));
+            // Hacia fuera de la pieza: del centro de la pieza hacia el centro del triángulo.
+            const glm::vec3 middle = (point(t[0]) + point(t[1]) + point(t[2])) / 3.0f;
+            if (glm::dot(normal, middle - center) < 0) normal = -normal;
             for (const auto index : triangle.indices) {
                 const auto [it, inserted] = faceVertices.try_emplace(
                     std::pair{triangle.face, index}, static_cast<std::uint32_t>(geometry.vertices.size()));
                 if (inserted) {
-                    const auto position = mesh.positions[index];
-                    geometry.vertices.push_back({{position.x, position.y, position.z},
-                        {light[triangle.face], static_cast<float>(triangle.face), 0.0f}});
+                    geometry.vertices.push_back({point(index), {static_cast<float>(triangle.face), 0.0f, 0.0f}, normal});
                 }
                 geometry.indices.push_back(it->second);
             }
@@ -228,8 +238,8 @@ SceneGeometry makeGeometry() {
     geometry.ramp = append(ge3d::Primitive::ramp);
     geometry.gridFirst = static_cast<std::uint32_t>(geometry.vertices.size());
     const auto line = [&](glm::vec3 a, glm::vec3 b, glm::vec3 color) {
-        geometry.vertices.push_back({a, color});
-        geometry.vertices.push_back({b, color});
+        geometry.vertices.push_back({a, color, {0, 1, 0}});
+        geometry.vertices.push_back({b, color, {0, 1, 0}});
     };
     // Los ejes rojo/azul los colorea el shader según la posición en el mundo.
     constexpr float extent = static_cast<float>(gridHalfLines);
@@ -260,21 +270,13 @@ void createBuffer(VmaAllocator allocator, VkDeviceSize size, VkBufferUsageFlags 
         "Allocate geometry buffer");
 }
 
-VkPipeline createScenePipeline(VkDevice device, VkFormat colorFormat, VkPipelineLayout& layout,
-                               VkPrimitiveTopology topology) {
-    VkShaderModule vertex = createShaderModule(device, "scene.vertex.spv");
+// Pipelines de la escena: piezas (triángulos), cuadrícula (líneas) y vóxeles (vértice compacto).
+VkPipeline createScenePipeline(VkDevice device, VkFormat colorFormat, VkPipelineLayout layout,
+                               VkPrimitiveTopology topology, bool voxels) {
+    VkShaderModule vertex = createShaderModule(device, voxels ? "scene.voxel.spv" : "scene.vertex.spv");
     VkShaderModule fragment = VK_NULL_HANDLE;
     try {
         fragment = createShaderModule(device, "scene.fragment.spv");
-        VkPushConstantRange push{};
-        push.stageFlags = pushStages;
-        push.offset = 0;
-        push.size = sizeof(ScenePush);
-        VkPipelineLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-        layoutInfo.pushConstantRangeCount = 1;
-        layoutInfo.pPushConstantRanges = &push;
-        if (!layout) check(vkCreatePipelineLayout(device, &layoutInfo, nullptr, &layout), "Create pipeline layout");
-
         VkPipelineShaderStageCreateInfo stages[2]{};
         stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
         stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
@@ -286,15 +288,19 @@ VkPipeline createScenePipeline(VkDevice device, VkFormat colorFormat, VkPipeline
         stages[1].pName = "main";
 
         VkPipelineVertexInputStateCreateInfo vertexInput{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-        const VkVertexInputBindingDescription binding{0, sizeof(Vertex), VK_VERTEX_INPUT_RATE_VERTEX};
+        const VkVertexInputBindingDescription binding{0, voxels ? static_cast<std::uint32_t>(sizeof(ge3d::VoxelVertex))
+                                                                : static_cast<std::uint32_t>(sizeof(Vertex)),
+                                                      VK_VERTEX_INPUT_RATE_VERTEX};
         const VkVertexInputAttributeDescription attributes[] = {
             {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, position)},
-            {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, color)}
+            {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, color)},
+            {2, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, normal)}
         };
+        const VkVertexInputAttributeDescription voxelAttribute{0, 0, VK_FORMAT_R32G32_UINT, 0};
         vertexInput.vertexBindingDescriptionCount = 1;
         vertexInput.pVertexBindingDescriptions = &binding;
-        vertexInput.vertexAttributeDescriptionCount = 2;
-        vertexInput.pVertexAttributeDescriptions = attributes;
+        vertexInput.vertexAttributeDescriptionCount = voxels ? 1 : 3;
+        vertexInput.pVertexAttributeDescriptions = voxels ? &voxelAttribute : attributes;
         VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
         assembly.topology = topology;
         VkPipelineViewportStateCreateInfo viewport{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
@@ -416,6 +422,14 @@ void run() {
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
     VkPipeline cubePipeline = VK_NULL_HANDLE;
     VkPipeline gridPipeline = VK_NULL_HANDLE;
+    VkPipeline voxelPipeline = VK_NULL_HANDLE;
+    VkDescriptorSetLayout sceneSetLayout = VK_NULL_HANDLE;
+    VkDescriptorPool scenePool = VK_NULL_HANDLE;
+    VkDescriptorSet sceneSets[2]{};
+    GpuBuffer frameUniforms[2]{};
+    MaterialTextures textures;
+    TerrainRenderer terrainRenderer;
+    bool terrainReady = false;
     Buffer vertices, indices, staging;
     VkSampler sceneSampler{};
     VkDescriptorSet sceneTextures[2]{};
@@ -444,7 +458,14 @@ void run() {
     const auto cleanup = [&] {
         if (device) {
             vkDeviceWaitIdle(device);
+            if (uiRenderer) textures.unregisterThumbnails();
             if (uiRenderer) ImGui_ImplVulkan_Shutdown();
+            textures.destroy();
+            if (terrainReady) terrainRenderer.destroy();
+            for (auto& uniforms : frameUniforms) destroyGpuBuffer(allocator, uniforms);
+            if (scenePool) vkDestroyDescriptorPool(device, scenePool, nullptr);
+            if (sceneSetLayout) vkDestroyDescriptorSetLayout(device, sceneSetLayout, nullptr);
+            if (voxelPipeline) vkDestroyPipeline(device, voxelPipeline, nullptr);
             if (sceneSampler) vkDestroySampler(device, sceneSampler, nullptr);
             for (const auto& buffer : {vertices, indices, staging}) {
                 if (buffer.handle) vmaDestroyBuffer(allocator, buffer.handle, buffer.allocation);
@@ -588,8 +609,44 @@ void run() {
             createRenderImage(device, allocator, depthFormat, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
                 VK_IMAGE_ASPECT_DEPTH_BIT, sceneDepths[i]);
         }
-        cubePipeline = createScenePipeline(device, sceneFormat, pipelineLayout, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
-        gridPipeline = createScenePipeline(device, sceneFormat, pipelineLayout, VK_PRIMITIVE_TOPOLOGY_LINE_LIST);
+        // Descriptores de la escena: datos del fotograma (cámara y materiales) y el array de texturas.
+        const VkDescriptorSetLayoutBinding sceneBindings[] = {
+            {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+        };
+        VkDescriptorSetLayoutCreateInfo setLayoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        setLayoutInfo.bindingCount = 2;
+        setLayoutInfo.pBindings = sceneBindings;
+        check(vkCreateDescriptorSetLayout(device, &setLayoutInfo, nullptr, &sceneSetLayout), "Create scene set layout");
+        VkPushConstantRange pushRange{pushStages, 0, sizeof(ScenePush)};
+        VkPipelineLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        layoutInfo.setLayoutCount = 1;
+        layoutInfo.pSetLayouts = &sceneSetLayout;
+        layoutInfo.pushConstantRangeCount = 1;
+        layoutInfo.pPushConstantRanges = &pushRange;
+        check(vkCreatePipelineLayout(device, &layoutInfo, nullptr, &pipelineLayout), "Create pipeline layout");
+        cubePipeline = createScenePipeline(device, sceneFormat, pipelineLayout, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, false);
+        gridPipeline = createScenePipeline(device, sceneFormat, pipelineLayout, VK_PRIMITIVE_TOPOLOGY_LINE_LIST, false);
+        voxelPipeline = createScenePipeline(device, sceneFormat, pipelineLayout, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, true);
+
+        const VkDescriptorPoolSize poolSizes[] = {
+            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2},
+            {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2},
+        };
+        VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        poolInfo.maxSets = 2;
+        poolInfo.poolSizeCount = 2;
+        poolInfo.pPoolSizes = poolSizes;
+        check(vkCreateDescriptorPool(device, &poolInfo, nullptr, &scenePool), "Create scene descriptor pool");
+        const VkDescriptorSetLayout setLayouts[] = {sceneSetLayout, sceneSetLayout};
+        VkDescriptorSetAllocateInfo setInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        setInfo.descriptorPool = scenePool;
+        setInfo.descriptorSetCount = 2;
+        setInfo.pSetLayouts = setLayouts;
+        check(vkAllocateDescriptorSets(device, &setInfo, sceneSets), "Allocate scene descriptor sets");
+        for (int i = 0; i < 2; ++i) {
+            frameUniforms[i] = createGpuBuffer(allocator, sizeof(FrameData), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true);
+        }
         const auto geometry = makeGeometry();
 
         IMGUI_CHECKVERSION();
@@ -601,6 +658,9 @@ void run() {
         float contentScaleY = 1.0f;
         glfwGetWindowContentScale(window, &contentScaleX, &contentScaleY);
         EditorView editor(contentScaleX);
+        ge3d::MaterialLibrary library;
+        std::uint64_t materialsVersion = 1;
+        const auto contentRoot = ge3d::pathFromUtf8(GE3D_CONTENT_DIR);
         uiPlatform = ImGui_ImplGlfw_InitForVulkan(window, true);
         if (!uiPlatform) throw std::runtime_error("Initialize GLFW editor backend");
         VkSamplerCreateInfo sampler{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
@@ -701,7 +761,7 @@ void run() {
                 info.Device = device;
                 info.QueueFamily = queues.graphics;
                 info.Queue = graphicsQueue;
-                info.DescriptorPoolSize = 8;
+                info.DescriptorPoolSize = 512;  // vista de escena + miniaturas de materiales
                 info.MinImageCount = std::max(2u, capabilities.minImageCount);
                 info.ImageCount = actualImages;
                 info.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
@@ -716,6 +776,9 @@ void run() {
                     sceneTextures[i] = ImGui_ImplVulkan_AddTexture(sceneSampler, sceneColors[i].view,
                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
                 }
+                // Las miniaturas de materiales viven en el pool del backend: se registran de nuevo.
+                textures.registerThumbnails();
+                editor.setMaterials(library, textures.thumbnails());
             }
             VkSemaphoreCreateInfo semaphoreInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
             for (auto& semaphore : renderDone) {
@@ -736,6 +799,74 @@ void run() {
             VkFenceCreateInfo fence{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO}; fence.flags = VK_FENCE_CREATE_SIGNALED_BIT;
             check(vkCreateFence(device, &fence, nullptr, &frameFence[i]), "Create frame fence");
         }
+
+        // --- Materiales y texturas -------------------------------------------------------------
+        // Se recargan solos al guardar materials.json o cualquier PNG que usen (se comprueba cada segundo).
+        const GpuContext gpu{device, allocator, graphicsQueue, commandPool};
+        std::vector<std::pair<std::filesystem::path, std::filesystem::file_time_type>> watched;
+        const auto writeSceneSets = [&] {
+            for (int i = 0; i < 2; ++i) {
+                const VkDescriptorBufferInfo bufferInfo{frameUniforms[i].handle, 0, sizeof(FrameData)};
+                const VkDescriptorImageInfo imageInfo{textures.sampler(), textures.view(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+                VkWriteDescriptorSet writes[2]{};
+                writes[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+                writes[0].dstSet = sceneSets[i];
+                writes[0].dstBinding = 0;
+                writes[0].descriptorCount = 1;
+                writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+                writes[0].pBufferInfo = &bufferInfo;
+                writes[1] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+                writes[1].dstSet = sceneSets[i];
+                writes[1].dstBinding = 1;
+                writes[1].descriptorCount = 1;
+                writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                writes[1].pImageInfo = &imageInfo;
+                vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
+            }
+        };
+        const auto fileTime = [](const std::filesystem::path& path) {
+            std::error_code error;
+            const auto time = std::filesystem::last_write_time(path, error);
+            return error ? std::filesystem::file_time_type{} : time;
+        };
+        const auto loadMaterials = [&](bool initial) {
+            std::vector<std::string> errors;
+            ge3d::MaterialLibrary loaded;
+            try {
+                loaded = ge3d::loadMaterialLibrary(contentRoot / "materials.json");
+            } catch (const std::exception& error) {
+                errors.push_back(std::string("Catalogo de materiales: ") + error.what() + " (se conserva el anterior)");
+                loaded = library;
+            }
+            if (!initial) {
+                check(vkDeviceWaitIdle(device), "Wait before reloading materials");
+                if (uiRenderer) textures.unregisterThumbnails();
+            }
+            library = loaded;
+            textures.load(gpu, library, contentRoot, errors);
+            writeSceneSets();
+            if (uiRenderer) textures.registerThumbnails();
+            editor.setMaterials(library, textures.thumbnails());
+            ++materialsVersion;
+            for (const auto& error : errors) editorLog().add(LogLevel::warning, "Materiales: " + error);
+            editorLog().add(LogLevel::info, (initial ? "Materiales: " : "Materiales recargados: ") +
+                std::to_string(library.materials().size()) + " materiales, " + std::to_string(textures.layerCount()) +
+                " texturas de " + std::to_string(textures.textureSize()) + " px");
+            watched.clear();
+            watched.emplace_back(contentRoot / "materials.json", fileTime(contentRoot / "materials.json"));
+            for (const auto& material : library.materials()) {
+                for (const auto* path : {&material.side, &material.top, &material.bottom}) {
+                    if (path->empty()) continue;
+                    const auto full = contentRoot / ge3d::pathFromUtf8(*path);
+                    watched.emplace_back(full, fileTime(full));
+                }
+            }
+        };
+        loadMaterials(true);
+        terrainRenderer.init(gpu);
+        terrainReady = true;
+        auto lastWatch = std::chrono::steady_clock::now();
+        std::uint64_t frameNumber = 0;
 
 
         constexpr VkDeviceSize vertexCapacity = 4 * 1024 * 1024;
@@ -789,6 +920,12 @@ void run() {
         std::cout << "Vulkan pixel art preview: 320 x 180\n";
         while (!editor.quitApproved()) {
             glfwPollEvents();
+            if (std::chrono::steady_clock::now() - lastWatch > std::chrono::seconds(1)) {
+                lastWatch = std::chrono::steady_clock::now();
+                const bool changed = std::any_of(watched.begin(), watched.end(),
+                    [&](const auto& entry) { return fileTime(entry.first) != entry.second; });
+                if (changed) loadMaterials(false);
+            }
             // Cerrar la ventana pasa por el editor: si hay cambios sin guardar pregunta antes.
             if (glfwWindowShouldClose(window)) {
                 glfwSetWindowShouldClose(window, GLFW_FALSE);
@@ -841,6 +978,22 @@ void run() {
             check(vkResetCommandBuffer(command, 0), "Reset command buffer");
             VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
             check(vkBeginCommandBuffer(command, &begin), "Begin command buffer");
+
+            // Terreno: remallado con presupuesto y copias a la GPU (fuera de la pasada de render).
+            ++frameNumber;
+            const std::uint64_t completedFrame = frameNumber > 2 ? frameNumber - 2 : 0;
+            terrainRenderer.update(command, static_cast<int>(frame), frameNumber, completedFrame, editor.scene(),
+                [&](const std::string& id) { return textures.gpuIndex(id); }, materialsVersion);
+
+            // Datos del fotograma: cámara, sol y tabla de materiales.
+            const auto camera = editor.renderCamera();
+            FrameData frameData;
+            frameData.viewProj = camera;
+            frameData.sun = glm::vec4(glm::normalize(glm::vec3{0.35f, 1.0f, 0.55f}), 0.0f);
+            frameData.materials = textures.table();
+            std::memcpy(frameUniforms[frame].mapped, &frameData, sizeof(frameData));
+            check(vmaFlushAllocation(allocator, frameUniforms[frame].allocation, 0, VK_WHOLE_SIZE), "Flush frame data");
+
             transition(command, color.image, VK_IMAGE_ASPECT_COLOR_BIT,
                 VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                 VK_PIPELINE_STAGE_2_NONE, 0, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -877,34 +1030,41 @@ void run() {
             vkCmdSetViewport(command, 0, 1, &viewport);
             vkCmdSetScissor(command, 0, 1, &scissor);
 
-            const auto camera = editor.renderCamera();
+            vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &sceneSets[frame], 0, nullptr);
             const VkDeviceSize vertexOffset = 0;
             vkCmdBindVertexBuffers(command, 0, 1, &vertices.handle, &vertexOffset);
             vkCmdBindIndexBuffer(command, indices.handle, 0, VK_INDEX_TYPE_UINT32);
             vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, cubePipeline);
             for (const auto& entity : editor.scene().entities()) {
+                if (!entity.shape) continue;
                 ScenePush push;
-                push.transform = camera * EditorView::modelMatrix(entity.transform);
-                push.grid.w = 2.0f;
-                for (std::size_t face = 0; face < ge3d::maxFaces; ++face) {
-                    push.faces[face] = packPaletteColor(entity.faces[face]);
-                }
-                const auto mesh = entity.primitive == ge3d::Primitive::box ? geometry.box : geometry.ramp;
+                push.model = EditorView::modelMatrix(entity.transform);
+                push.grid.w = modePiece;
+                push.data = packFaceMaterials(*entity.shape, textures);
+                const auto mesh = entity.shape->primitive == ge3d::Primitive::box ? geometry.box : geometry.ramp;
                 vkCmdPushConstants(command, pipelineLayout, pushStages, 0, sizeof(push), &push);
                 vkCmdDrawIndexed(command, mesh.count, 1, mesh.firstIndex, 0, 0);
             }
+            // Terreno de vóxeles: chunks visibles desde la cámara.
+            vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, voxelPipeline);
+            terrainRenderer.draw(command, pipelineLayout, camera, editor.scene(),
+                                 [](const ge3d::Transform& transform) { return EditorView::modelMatrix(transform); });
+            const auto& terrainStats = terrainRenderer.stats();
+            editor.setTerrainStats({terrainStats.terrains, terrainStats.chunks, terrainStats.visibleChunks,
+                                    terrainStats.pendingChunks, terrainStats.quads, terrainStats.visibleQuads,
+                                    static_cast<std::size_t>(terrainStats.gpuBytes)});
+            vkCmdBindVertexBuffers(command, 0, 1, &vertices.handle, &vertexOffset);
             if (editor.showGrid()) {
                 // Cuadrícula "infinita": se recoloca bajo el punto que mira la cámara, ajustada a su
                 // separación, y se desvanece con tramado antes de llegar al borde de la malla base.
                 const auto grid = editor.gridView();
                 const float limit = static_cast<float>(gridHalfLines) * 0.95f;
                 ScenePush push;
-                push.transform = camera *
-                    glm::translate(glm::mat4{1.0f}, {grid.offset.x, 0.01f, grid.offset.y}) *
-                    glm::scale(glm::mat4{1.0f}, {grid.spacing, 1.0f, grid.spacing});
+                push.model = glm::translate(glm::mat4{1.0f}, {grid.offset.x, 0.01f, grid.offset.y}) *
+                             glm::scale(glm::mat4{1.0f}, {grid.spacing, 1.0f, grid.spacing});
                 push.fade = {(grid.focus - grid.offset) / grid.spacing,
                              std::min(grid.fadeRadius / grid.spacing, limit), 0.0f};
-                push.grid = {grid.offset.x, grid.offset.y, grid.spacing, 1.0f};
+                push.grid = {grid.offset.x, grid.offset.y, grid.spacing, modeGrid};
                 vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, gridPipeline);
                 vkCmdPushConstants(command, pipelineLayout, pushStages, 0, sizeof(push), &push);
                 vkCmdDraw(command, geometry.gridCount, 1, geometry.gridFirst, 0);

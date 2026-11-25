@@ -18,10 +18,21 @@ struct EntityChange {
     std::size_t index{};
 };
 
+// Cambio de los vóxeles de un chunk de terreno: contenido antes y después (32 KB cada uno).
+struct TerrainChange {
+    EntityId entity{};
+    int chunk{};
+    std::vector<VoxelGrid::Voxel> before;
+    std::vector<VoxelGrid::Voxel> after;
+};
+
 // Una operación de edición que se deshace de una vez (un trazo, un arrastre de gizmo, un duplicado...).
+// Al aplicarla primero van los cambios de entidad y después los de terreno; al deshacer, al revés.
 struct EditCommand {
     std::string label;
     std::vector<EntityChange> changes;
+    std::vector<TerrainChange> terrainChanges;
+    [[nodiscard]] bool empty() const noexcept { return changes.empty() && terrainChanges.empty(); }
 };
 
 class History {

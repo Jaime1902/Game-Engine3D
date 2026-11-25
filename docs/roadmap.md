@@ -7,10 +7,21 @@ La base C++20 incluye un runtime compartido, ejecutables de consola, un editor V
 | Etapa | Estado | Hecho | Pendiente |
 |---|---|---|---|
 | 0 | ✅ Completa | CMake con presets MSVC y MinGW, runtime, CTest, sondeo Vulkan. | — |
-| 1 | ✅ Completa | Ventana GLFW, Vulkan 1.3 con dynamic rendering, offscreen 320 × 180 con sampler nearest, cuadrícula, picking, gizmos, Inspector. Capas de validación activas en Debug: 0 errores tras redimensionar, minimizar, restaurar y cerrar minimizada. | Geometry pool por chunks cuando haya más mallas que caja y rampa. |
-| 2 | ✅ Criterio cubierto | UUID v4 por entidad, escena JSON versionada (v2, con migración desde v1) con guardado atómico y validación antes de sustituir, historial deshacer/rehacer (crear, duplicar, borrar, renombrar, gizmo e Inspector como una operación), menús y atajos. Pintar caras con paleta indexada de 24 colores (herramienta B, trazo = una operación, cuentagotas). Pincel de construcción (herramienta C): celdas de 0,5/1/2 m, apilar sobre caras, trazo, rectángulo, borrado y giro de 90°. Cuadrícula infinita. | Prefabs, transform con cuaternión y jerarquía padre/hijo: no bloquean la etapa 3 y se harán cuando el pueblo los necesite. |
-| 3 | 🟡 Base | Play / Pausa / Paso: Play juega sobre una copia de la escena y Stop la descarta (edición y deshacer separados). Consola del editor. | Luau, pestaña Código, parámetros de script en el Inspector, eventos. |
-| 4 – 7 | ⬜ Sin empezar | — | Según la tabla siguiente. |
+| 1 | ✅ Completa | Ventana GLFW, Vulkan 1.3 con dynamic rendering, offscreen 320 × 180 con sampler nearest, cuadrícula, picking, gizmos, Inspector. Capas de validación activas en Debug: 0 errores tras redimensionar, minimizar, restaurar y cerrar minimizada. Pool de geometría por páginas de 4 MB con VMA y staging por fotograma (lo usa el terreno). | — |
+| 2 | ✅ Criterio cubierto | UUID v4 por entidad, escena JSON versionada con migraciones y guardado atómico, historial deshacer/rehacer, menús y atajos. Materiales con textura por cara (herramienta B, trazo = una operación, cuentagotas). Pincel de construcción (herramienta C). Cuadrícula infinita. | Prefabs, transform con cuaternión y jerarquía padre/hijo: no bloquean la etapa 3 y se harán cuando el pueblo los necesite. |
+| 3 | 🟡 Puente hecho | Modelo de componentes: Transformación + Forma + Terreno, "Agregar componente" y quitar desde el Inspector, guardado por componente (escena v3). Play / Pausa / Paso sobre una copia profunda de la escena. Consola del editor. | Luau, componente Script, pestaña Código, parámetros de script en el Inspector, eventos. |
+| 5 | 🟡 Materiales | Catálogo `materials.json` con texturas PNG por orientación (lado, arriba, abajo) y tinte; Texture2DArray con mipmaps nearest; UV planas en metros; recarga en caliente al guardar un PNG o el catálogo. | Iluminación por bandas, paletas por proyecto, niebla, sombra direccional, shaders Slang editables por material. |
+| — | ✅ Extra: terreno | Terreno de vóxeles: chunks de 32³, greedy meshing, remallado incremental con presupuesto, vértices de 8 bytes, descarte por frustum, generación procedural determinista (ruido fractal con semilla, capas, orilla y agua), pinceles elevar / excavar / pintar / aplanar con deshacer por chunk, guardado en texto RLE por columnas. | Agua transparente, árboles y decoración procedural, LOD para terrenos mayores de 512 × 512. |
+| 4, 6, 7 | ⬜ Sin empezar | — | Según la tabla siguiente. |
+
+### Medidas del terreno (equipo de desarrollo, editor en Debug)
+
+| Terreno | Generar | Mallar todo | Peor chunk | Caras tras greedy meshing | Caras sin fusionar | Memoria GPU |
+|---|---|---|---|---|---|---|
+| 128 × 64 × 128 (32 chunks) | 8 ms | 17 ms | 1,3 ms | 4.289 | ~1,5 millones | 0,1 MB |
+| 512 × 128 × 512 (1.024 chunks) | 97 ms | 306 ms | 1,8 ms | 61.118 | ~22 millones | 1,9 MB |
+
+El remallado se reparte entre fotogramas con un presupuesto de 6 ms, así que editar o generar no congela el editor.
 
 | Etapa | Qué se construye | Criterio de aceptación |
 |---|---|---|

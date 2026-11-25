@@ -5,8 +5,8 @@ int main() {
     auto scene = ge3d::makeStarterScene();
     std::cout << "Game-Engine3D editor bootstrap\n";
     for (const auto& entity : scene.entities()) {
-        const auto mesh = ge3d::makePrimitive(entity.primitive);
-        std::cout << entity.id << " " << entity.name << " " << mesh.triangles.size()
-                  << " triangles\n";
+        std::cout << entity.id << " " << entity.name;
+        if (entity.shape) std::cout << " " << ge3d::makePrimitive(entity.shape->primitive).triangles.size() << " triangles";
+        std::cout << '\n';
     }
 }

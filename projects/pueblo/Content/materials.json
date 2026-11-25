@@ -1,0 +1,68 @@
+{
+  "format": "ge3d.materials",
+  "version": 1,
+  "materials": [
+    {
+      "id": "cesped",
+      "name": "Cesped",
+      "texture": "textures/cesped_lado.png",
+      "top": "textures/cesped.png",
+      "bottom": "textures/tierra.png"
+    },
+    {
+      "id": "tierra",
+      "name": "Tierra",
+      "texture": "textures/tierra.png"
+    },
+    {
+      "id": "piedra",
+      "name": "Piedra",
+      "texture": "textures/piedra.png"
+    },
+    {
+      "id": "adoquin",
+      "name": "Adoquin",
+      "texture": "textures/adoquin.png"
+    },
+    {
+      "id": "arena",
+      "name": "Arena",
+      "texture": "textures/arena.png"
+    },
+    {
+      "id": "tablones",
+      "name": "Tablones",
+      "texture": "textures/tablones.png"
+    },
+    {
+      "id": "ladrillo",
+      "name": "Ladrillo",
+      "texture": "textures/ladrillo.png"
+    },
+    {
+      "id": "teja",
+      "name": "Teja",
+      "texture": "textures/teja.png"
+    },
+    {
+      "id": "yeso",
+      "name": "Yeso",
+      "texture": "textures/yeso.png"
+    },
+    {
+      "id": "agua",
+      "name": "Agua",
+      "texture": "textures/agua.png"
+    },
+    {
+      "id": "nieve",
+      "name": "Nieve",
+      "texture": "textures/nieve.png"
+    },
+    {
+      "id": "hojas",
+      "name": "Hojas",
+      "texture": "textures/hojas.png"
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ge3d/History.hpp"
+#include "ge3d/Materials.hpp"
 #include "ge3d/Scene.hpp"
 #include <glm/glm.hpp>
 #include <imgui.h>
@@ -30,6 +31,20 @@ public:
     [[nodiscard]] const ge3d::Scene& scene() const { return scene_; }
     [[nodiscard]] bool showGrid() const { return showGrid_; }
     [[nodiscard]] GridView gridView() const;
+
+    // Catálogo de materiales y sus miniaturas (una por material, en el mismo orden).
+    void setMaterials(const ge3d::MaterialLibrary& library, const std::vector<ImTextureID>& thumbnails);
+    // Estadísticas del renderer de terreno para el Inspector y la barra de estado.
+    struct TerrainViewStats {
+        int terrains{};
+        int chunks{};
+        int visibleChunks{};
+        int pendingChunks{};
+        std::size_t quads{};
+        std::size_t visibleQuads{};
+        std::size_t gpuBytes{};
+    };
+    void setTerrainStats(const TerrainViewStats& stats) { terrainStats_ = stats; }
     [[nodiscard]] bool isPlaying() const { return playSnapshot_.has_value(); }
     [[nodiscard]] bool hasUnsavedChanges() const { return history_.state() != savedState_; }
     [[nodiscard]] std::string windowTitle() const;
@@ -39,13 +54,16 @@ public:
     static glm::mat4 modelMatrix(const ge3d::Transform& transform);
 
 private:
-    enum class Tool { hand, move, rotate, scale, paint, build };
+    enum class Tool { hand, move, rotate, scale, paint, build, terrain };
+    enum class TerrainBrush { add, remove, paint, flatten };
     struct Hit {
         ge3d::EntityId entity{};
-        std::uint32_t face{};
+        std::uint32_t face{};       // pieza: número de cara; terreno: normal 0-5 (-X +X -Y +Y -Z +Z)
         float distance{};
         glm::vec3 point{};
         glm::vec3 normal{};
+        bool terrain{};
+        glm::ivec3 voxel{};         // terreno: vóxel tocado
     };
     struct Ray {
         glm::vec3 start;
@@ -67,6 +85,8 @@ private:
     [[nodiscard]] glm::mat4 projection() const;
     [[nodiscard]] Ray mouseRay(ImVec2 mouse, ImVec2 origin, ImVec2 size) const;
     [[nodiscard]] std::optional<Hit> raycast(ImVec2 mouse, ImVec2 origin, ImVec2 size) const;
+    [[nodiscard]] std::optional<Hit> raycastTerrain(const ge3d::Entity& entity, const Ray& ray) const;
+    [[nodiscard]] static glm::mat4 terrainMatrix(const ge3d::Entity& entity);
     void pick(ImVec2 mouse, ImVec2 origin, ImVec2 size);
     // Dibuja el contorno (y opcionalmente el relleno) de una pieza proyectada en la vista.
     // face < 0 dibuja la pieza entera; si no, solo esa cara.
@@ -83,6 +103,18 @@ private:
     void handleBuildTool(ImDrawList* draw, ImVec2 origin, ImVec2 size, bool canUseMouse);
     void finishBuildStroke();
     void finishEraseStroke();
+
+    // Terreno
+    void createTerrain();
+    void drawTerrainComponent(ge3d::Entity& entity, const ge3d::Entity& frameStart);
+    void handleTerrainTool(ImDrawList* draw, ImVec2 origin, ImVec2 size, bool canUseMouse);
+    void applyTerrainBrush(const Hit& hit);
+    void finishSculpt();
+    // Materiales en la interfaz
+    bool materialSwatch(const char* id, const ge3d::MaterialId& material, bool selected, float size);
+    bool materialPicker(ge3d::MaterialId& material, float size, int perRow);
+    void materialStrip();
+    [[nodiscard]] const char* materialName(const ge3d::MaterialId& material) const;
     void focusSelection();
     void setViewFromMatrix(const glm::mat4& view);
 
@@ -112,7 +144,8 @@ private:
     void redo();
     void validateSelection();
     [[nodiscard]] bool editInProgress() const {
-        return gizmoEdit_.has_value() || inspectorEdit_.has_value() || !paintStroke_.empty() || building_ || erasing_;
+        return gizmoEdit_.has_value() || inspectorEdit_.has_value() || !paintStroke_.empty() || building_ || erasing_ ||
+               sculpting_;
     }
 
     // Escena y archivos
@@ -162,7 +195,22 @@ private:
     // Trazo de pintura en curso: estado previo de cada pieza tocada. Se guarda como una sola operación.
     std::map<ge3d::EntityId, ge3d::Entity> paintStroke_;
     bool painting_ = false;
-    ge3d::PaletteIndex paintColor_ = ge3d::paletteOrange;
+    ge3d::MaterialId paintMaterial_ = "piedra";   // material activo de Pintar, Construir y Terreno
+    ge3d::MaterialLibrary library_;
+    std::vector<ImTextureID> thumbnails_;
+    TerrainViewStats terrainStats_;
+
+    // Pinceles de terreno. El trazo guarda el contenido previo de cada chunk tocado.
+    TerrainBrush terrainBrush_ = TerrainBrush::add;
+    int terrainRadius_ = 3;
+    bool sculpting_ = false;
+    ge3d::EntityId sculptTarget_{};
+    int flattenHeight_ = 0;
+    std::map<int, std::vector<ge3d::VoxelGrid::Voxel>> sculptBefore_;
+    double lastSculptTime_ = 0.0;
+    ge3d::TerrainSettings newTerrain_{};          // configuración de "Crear terreno"
+    ge3d::TerrainSettings terrainDraft_{};        // ajustes del Inspector aún sin aplicar
+    ge3d::EntityId draftOwner_{};
 
     // Pincel de construcción. El trazo se acumula y se crea al soltar, como una sola operación.
     ge3d::Primitive buildShape_ = ge3d::Primitive::box;

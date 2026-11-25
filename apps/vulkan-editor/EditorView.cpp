@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <functional>
 #include <cmath>
 #include <cstdio>
@@ -128,7 +129,7 @@ ImFont* loadFonts(float scale, ImFont*& bold) {
 }
 
 // --- Iconos dibujados con primitivas (la fuente no trae iconos) -------------------------------
-enum class Icon { hand, move, rotate, scale, paint, build, play, pause, step, cube, ramp, folder, file, scene };
+enum class Icon { hand, move, rotate, scale, paint, build, terrain, play, pause, step, cube, ramp, folder, file, scene, empty };
 
 void drawIcon(ImDrawList* draw, Icon icon, ImVec2 center, float r, ImU32 color) {
     const float t = std::max(1.0f, r * 0.17f);
@@ -200,6 +201,16 @@ void drawIcon(ImDrawList* draw, Icon icon, ImVec2 center, float r, ImU32 color) 
         draw->AddPolyline(points, 3, color, ImDrawFlags_Closed, t);
         break;
     }
+    case Icon::terrain: {
+        // Dos montañas sobre una línea de suelo.
+        draw->AddTriangleFilled(p(-0.95f, 0.7f), p(-0.25f, -0.55f), p(0.45f, 0.7f), color);
+        draw->AddTriangleFilled(p(0.0f, 0.7f), p(0.5f, -0.1f), p(0.98f, 0.7f), color);
+        draw->AddLine(p(-0.95f, 0.85f), p(0.98f, 0.85f), color, t);
+        break;
+    }
+    case Icon::empty:
+        draw->AddCircle(center, r * 0.6f, color, 12, t);
+        break;
     case Icon::folder:
         draw->AddRectFilled(p(-0.9f, -0.62f), p(-0.1f, -0.25f), color, r * 0.1f);
         draw->AddRectFilled(p(-0.9f, -0.4f), p(0.9f, 0.72f), color, r * 0.12f);
@@ -300,42 +311,8 @@ void vectorRow(const char* label, ge3d::Vec3& value, float speed, float minimum,
     ImGui::PopID();
 }
 
-// --- Paleta -------------------------------------------------------------------------------------
-
-ImVec4 paletteColor(ge3d::PaletteIndex index) {
-    const auto& color = ge3d::defaultPalette[index < ge3d::paletteSize ? index : 0];
-    return {color.r / 255.0f, color.g / 255.0f, color.b / 255.0f, 1.0f};
-}
-
-// Muestra de un color de la paleta; la seleccionada lleva un marco blanco.
-bool paletteSwatch(const char* id, ge3d::PaletteIndex index, bool selected, float size) {
-    const bool pressed = ImGui::ColorButton(id, paletteColor(index),
-        ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoAlpha | ImGuiColorEditFlags_NoDragDrop, {size, size});
-    if (selected) {
-        auto* draw = ImGui::GetWindowDrawList();
-        const ImVec2 min = ImGui::GetItemRectMin();
-        const ImVec2 max = ImGui::GetItemRectMax();
-        draw->AddRect({min.x - 2, min.y - 2}, {max.x + 2, max.y + 2}, IM_COL32(255, 255, 255, 255), 0, 0, 2);
-    }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%u  %s", static_cast<unsigned>(index), ge3d::defaultPalette[index].name);
-    return pressed;
-}
-
-// Rejilla con toda la paleta. Devuelve true si se eligió un color.
-bool palettePicker(ge3d::PaletteIndex& index, float size, int perRow) {
-    bool changed = false;
-    for (std::size_t i = 0; i < ge3d::paletteSize; ++i) {
-        if (i % static_cast<std::size_t>(perRow) != 0) ImGui::SameLine(0, 4);
-        ImGui::PushID(static_cast<int>(i));
-        const auto color = static_cast<ge3d::PaletteIndex>(i);
-        if (paletteSwatch("##color", color, color == index, size)) {
-            index = color;
-            changed = true;
-        }
-        ImGui::PopID();
-    }
-    return changed;
-}
+// Color de vista previa (relleno semitransparente) para pinceles.
+constexpr ImU32 previewFill = IM_COL32(255, 255, 255, 70);
 
 // Cabecera plegable de componente en el Inspector (gris, no del color de selección).
 bool componentHeader(const char* label, ImFont* bold) {
@@ -360,6 +337,12 @@ std::string lower(std::string text) {
 
 bool contains(const std::string& text, const char* filter) {
     return filter[0] == '\0' || lower(text).find(lower(filter)) != std::string::npos;
+}
+
+Icon entityIcon(const ge3d::Entity& entity) {
+    if (entity.terrain) return Icon::terrain;
+    if (entity.shape) return entity.shape->primitive == ge3d::Primitive::box ? Icon::cube : Icon::ramp;
+    return Icon::empty;
 }
 
 const char* displayName(const ge3d::Entity& entity) {
@@ -409,6 +392,392 @@ std::string EditorView::windowTitle() const {
 
 void EditorView::log(std::string message, bool error) {
     editorLog().add(error ? LogLevel::error : LogLevel::info, std::move(message));
+}
+
+// --- Materiales en la interfaz -----------------------------------------------------------------
+
+void EditorView::setMaterials(const ge3d::MaterialLibrary& library, const std::vector<ImTextureID>& thumbnails) {
+    library_ = library;
+    thumbnails_ = thumbnails;
+    if (!library_.empty() && !library_.find(paintMaterial_)) paintMaterial_ = library_.materials().front().id;
+}
+
+const char* EditorView::materialName(const ge3d::MaterialId& material) const {
+    const auto* definition = library_.find(material);
+    return definition ? definition->name.c_str() : material.c_str();
+}
+
+bool EditorView::materialSwatch(const char* id, const ge3d::MaterialId& material, bool selected, float size) {
+    const auto index = library_.indexOf(material);
+    bool pressed = false;
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {1, 1});
+    if (index && *index < thumbnails_.size()) {
+        pressed = ImGui::ImageButton(id, thumbnails_[*index], {size, size});
+    } else {
+        // Material que no está en el catálogo: se ve igual que en la escena (cuadros magenta).
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{0.85f, 0.1f, 0.75f, 1});
+        pressed = ImGui::Button(id, {size + 2, size + 2});
+        ImGui::PopStyleColor();
+    }
+    ImGui::PopStyleVar();
+    if (selected) {
+        const ImVec2 min = ImGui::GetItemRectMin();
+        const ImVec2 max = ImGui::GetItemRectMax();
+        ImGui::GetWindowDrawList()->AddRect({min.x - 1, min.y - 1}, {max.x + 1, max.y + 1}, IM_COL32(255, 255, 255, 255), 0, 0, 2);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(index ? "%s  (%s)" : "%s  (%s, no esta en materials.json)", materialName(material), material.c_str());
+    }
+    return pressed;
+}
+
+bool EditorView::materialPicker(ge3d::MaterialId& material, float size, int perRow) {
+    bool changed = false;
+    const auto& materials = library_.materials();
+    for (std::size_t i = 0; i < materials.size(); ++i) {
+        if (i % static_cast<std::size_t>(perRow) != 0) ImGui::SameLine(0, 4);
+        ImGui::PushID(static_cast<int>(i));
+        if (materialSwatch("##material", materials[i].id, materials[i].id == material, size)) {
+            material = materials[i].id;
+            changed = true;
+        }
+        ImGui::PopID();
+    }
+    if (materials.empty()) ImGui::TextDisabled("No hay materiales: revisa Content/materials.json");
+    return changed;
+}
+
+void EditorView::materialStrip() {
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextDisabled("Material");
+    const float swatch = ImGui::GetFrameHeight() - 4;
+    for (const auto& material : library_.materials()) {
+        ImGui::SameLine(0, 3);
+        ImGui::PushID(material.id.c_str());
+        if (materialSwatch("##tira", material.id, material.id == paintMaterial_, swatch)) paintMaterial_ = material.id;
+        ImGui::PopID();
+    }
+}
+
+// --- Terreno -------------------------------------------------------------------------------------
+
+glm::mat4 EditorView::terrainMatrix(const ge3d::Entity& entity) {
+    const float voxel = entity.terrain ? entity.terrain->settings.voxelSize : 1.0f;
+    return modelMatrix(entity.transform) * glm::scale(glm::mat4{1.0f}, glm::vec3{voxel});
+}
+
+std::optional<EditorView::Hit> EditorView::raycastTerrain(const ge3d::Entity& entity, const Ray& ray) const {
+    if (!entity.terrain || !entity.terrain->voxels) return std::nullopt;
+    const auto& grid = *entity.terrain->voxels;
+    const glm::mat4 model = terrainMatrix(entity);
+    const glm::mat4 inverse = glm::inverse(model);
+    const glm::vec3 origin = glm::vec3(inverse * glm::vec4(ray.start, 1.0f));
+    const glm::vec3 direction = glm::vec3(inverse * glm::vec4(ray.direction, 0.0f));
+    const glm::vec3 size{static_cast<float>(grid.sizeX()), static_cast<float>(grid.sizeY()), static_cast<float>(grid.sizeZ())};
+
+    // Entrada y salida de la caja del terreno (método de las losas). El parámetro t es el mismo en el
+    // mundo y en el espacio del terreno, porque la transformación es lineal.
+    float enter = 0.0f, leave = std::numeric_limits<float>::max();
+    int enterAxis = 1;
+    for (int axis = 0; axis < 3; ++axis) {
+        if (std::abs(direction[axis]) < 1e-9f) {
+            if (origin[axis] < 0 || origin[axis] > size[axis]) return std::nullopt;
+            continue;
+        }
+        float a = (0.0f - origin[axis]) / direction[axis];
+        float b = (size[axis] - origin[axis]) / direction[axis];
+        if (a > b) std::swap(a, b);
+        if (a > enter) {
+            enter = a;
+            enterAxis = axis;
+        }
+        leave = std::min(leave, b);
+        if (enter > leave) return std::nullopt;
+    }
+
+    // Recorrido vóxel a vóxel (Amanatides y Woo).
+    const glm::vec3 start = origin + direction * (enter + 1e-4f);
+    glm::ivec3 voxel = glm::clamp(glm::ivec3(glm::floor(start)), glm::ivec3(0), glm::ivec3(size) - 1);
+    glm::ivec3 step{0};
+    glm::vec3 next{std::numeric_limits<float>::max()};
+    glm::vec3 delta{std::numeric_limits<float>::max()};
+    for (int axis = 0; axis < 3; ++axis) {
+        if (direction[axis] > 0) {
+            step[axis] = 1;
+            next[axis] = (static_cast<float>(voxel[axis] + 1) - origin[axis]) / direction[axis];
+        } else if (direction[axis] < 0) {
+            step[axis] = -1;
+            next[axis] = (static_cast<float>(voxel[axis]) - origin[axis]) / direction[axis];
+        }
+        if (step[axis] != 0) delta[axis] = std::abs(1.0f / direction[axis]);
+    }
+    float t = enter;
+    int axis = enterAxis;
+    const int maxSteps = grid.sizeX() + grid.sizeY() + grid.sizeZ();
+    for (int i = 0; i <= maxSteps; ++i) {
+        if (grid.get(voxel.x, voxel.y, voxel.z) != 0) {
+            glm::vec3 localNormal{0.0f};
+            localNormal[axis] = step[axis] != 0 ? -static_cast<float>(step[axis]) : 1.0f;
+            Hit hit;
+            hit.entity = entity.id;
+            hit.face = static_cast<std::uint32_t>(axis * 2 + (localNormal[axis] > 0 ? 1 : 0));
+            hit.distance = t;
+            hit.point = ray.start + ray.direction * t;
+            hit.normal = glm::normalize(glm::vec3(glm::transpose(inverse) * glm::vec4(localNormal, 0.0f)));
+            hit.terrain = true;
+            hit.voxel = voxel;
+            return hit;
+        }
+        axis = next.x < next.y ? (next.x < next.z ? 0 : 2) : (next.y < next.z ? 1 : 2);
+        t = next[axis];
+        if (t > leave) break;
+        voxel[axis] += step[axis];
+        next[axis] += delta[axis];
+        if (voxel[axis] < 0 || voxel[axis] >= static_cast<int>(size[axis])) break;
+    }
+    return std::nullopt;
+}
+
+void EditorView::createTerrain() {
+    auto settings = newTerrain_;
+    const auto count = std::count_if(scene_.entities().begin(), scene_.entities().end(),
+                                     [](const ge3d::Entity& entity) { return entity.terrain.has_value(); });
+    // Centrado en el origen con la altura media del relieve a la altura del suelo (y = 0).
+    ge3d::Transform transform;
+    const float voxel = settings.voxelSize;
+    transform.position = {-static_cast<float>(settings.chunksX * ge3d::VoxelGrid::chunkSize) * voxel * 0.5f,
+                          -std::round(settings.generator.baseHeight) * voxel,
+                          -static_cast<float>(settings.chunksZ * ge3d::VoxelGrid::chunkSize) * voxel * 0.5f};
+    const auto started = std::chrono::steady_clock::now();
+    auto entity = scene_.makeEntity("Terreno " + std::to_string(count + 1), transform);
+    entity.terrain = ge3d::makeTerrain(settings);
+    const auto elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+    const auto id = entity.id;
+    execute(ge3d::makeCreateCommand(scene_, std::move(entity)));
+    selected_ = id;
+    pivot_ = {0.0f, 0.0f, 0.0f};
+    distance_ = std::max(distance_, static_cast<float>(settings.chunksX * ge3d::VoxelGrid::chunkSize) * voxel * 0.6f);
+    char message[96];
+    std::snprintf(message, sizeof message, "Terreno generado en %.0f ms", elapsed);
+    log(message);
+}
+
+void EditorView::applyTerrainBrush(const Hit& hit) {
+    auto* entity = scene_.find(sculptTarget_);
+    if (!entity || !entity->terrain || !entity->terrain->voxels) return;
+    auto& grid = *entity->terrain->voxels;
+    const auto material = terrainBrush_ == TerrainBrush::remove ? ge3d::VoxelGrid::Voxel{0} : grid.materialIndex(paintMaterial_);
+    if (terrainBrush_ != TerrainBrush::remove && material == 0) {
+        log("El terreno ya usa 255 materiales: no se pueden anadir mas", true);
+        return;
+    }
+    // Guarda el contenido previo de cada chunk la primera vez que el trazo lo toca.
+    const auto change = [&](int x, int y, int z, ge3d::VoxelGrid::Voxel value) {
+        if (!grid.contains(x, y, z) || grid.get(x, y, z) == value) return;
+        const int chunk = grid.chunkIndex(x / ge3d::VoxelGrid::chunkSize, y / ge3d::VoxelGrid::chunkSize,
+                                          z / ge3d::VoxelGrid::chunkSize);
+        if (!sculptBefore_.contains(chunk)) sculptBefore_.emplace(chunk, grid.chunkData(chunk));
+        grid.set(x, y, z, value);
+    };
+    const int r = terrainRadius_;
+    glm::ivec3 center = hit.voxel;
+    if (terrainBrush_ == TerrainBrush::add) center[static_cast<int>(hit.face / 2)] += hit.face % 2 ? 1 : -1;
+    if (terrainBrush_ == TerrainBrush::flatten) {
+        // Aplanar: vacía por encima de la altura inicial del trazo y rellena por debajo, en un cilindro.
+        for (int dz = -r; dz <= r; ++dz) {
+            for (int dx = -r; dx <= r; ++dx) {
+                if (dx * dx + dz * dz > r * r + r) continue;
+                const int x = center.x + dx, z = center.z + dz;
+                for (int y = flattenHeight_ + 1; y <= flattenHeight_ + r * 2 + 2; ++y) change(x, y, z, 0);
+                for (int y = flattenHeight_ - r; y <= flattenHeight_; ++y) {
+                    if (grid.contains(x, y, z) && grid.get(x, y, z) == 0) change(x, y, z, material);
+                }
+            }
+        }
+        return;
+    }
+    for (int dz = -r; dz <= r; ++dz) {
+        for (int dy = -r; dy <= r; ++dy) {
+            for (int dx = -r; dx <= r; ++dx) {
+                if (dx * dx + dy * dy + dz * dz > r * r + r) continue;
+                const int x = center.x + dx, y = center.y + dy, z = center.z + dz;
+                if (!grid.contains(x, y, z)) continue;
+                const auto current = grid.get(x, y, z);
+                if (terrainBrush_ == TerrainBrush::add && current == 0) change(x, y, z, material);
+                if (terrainBrush_ == TerrainBrush::remove) change(x, y, z, 0);
+                if (terrainBrush_ == TerrainBrush::paint && current != 0) change(x, y, z, material);
+            }
+        }
+    }
+}
+
+void EditorView::finishSculpt() {
+    sculpting_ = false;
+    const auto* entity = scene_.find(sculptTarget_);
+    if (entity && entity->terrain && entity->terrain->voxels && !sculptBefore_.empty()) {
+        static constexpr const char* labels[] = {"Elevar terreno", "Excavar terreno", "Pintar terreno", "Aplanar terreno"};
+        ge3d::EditCommand command;
+        command.label = labels[static_cast<int>(terrainBrush_)];
+        for (auto& [chunk, before] : sculptBefore_) {
+            auto after = entity->terrain->voxels->chunkData(chunk);
+            if (after != before) command.terrainChanges.push_back({entity->id, chunk, std::move(before), std::move(after)});
+        }
+        activeHistory().record(std::move(command));
+    }
+    sculptBefore_.clear();
+}
+
+void EditorView::handleTerrainTool(ImDrawList* draw, ImVec2 origin, ImVec2 size, bool canUseMouse) {
+    const auto& io = ImGui::GetIO();
+    auto hit = canUseMouse ? raycast(io.MousePos, origin, size) : std::nullopt;
+    if (hit && !hit->terrain) hit.reset();
+    if (!hit) return;
+    const auto* entity = scene_.find(hit->entity);
+    if (!entity || !entity->terrain) return;
+
+    // Vista previa: círculo del pincel sobre la superficie.
+    const float voxel = entity->terrain->settings.voxelSize;
+    const float radius = (static_cast<float>(terrainRadius_) + 0.5f) * voxel;
+    const glm::vec3 n = hit->normal;
+    const glm::vec3 tangent = glm::normalize(glm::abs(n.y) < 0.9f ? glm::cross(n, glm::vec3{0, 1, 0}) : glm::cross(n, glm::vec3{1, 0, 0}));
+    const glm::vec3 bitangent = glm::cross(n, tangent);
+    const glm::mat4 clip = projection() * view();
+    const ImU32 colors[] = {IM_COL32(120, 230, 120, 230), IM_COL32(255, 100, 90, 230), IM_COL32(255, 255, 255, 230),
+                            IM_COL32(250, 210, 90, 230)};
+    ImVec2 ring[33];
+    int points = 0;
+    for (int i = 0; i <= 32; ++i) {
+        const float angle = static_cast<float>(i) / 32.0f * 6.2831853f;
+        const glm::vec3 world = hit->point + n * 0.02f + (tangent * std::cos(angle) + bitangent * std::sin(angle)) * radius;
+        const glm::vec4 c = clip * glm::vec4(world, 1.0f);
+        if (c.w <= 0.001f) continue;
+        ring[points++] = {origin.x + (c.x / c.w * 0.5f + 0.5f) * size.x, origin.y + (0.5f - c.y / c.w * 0.5f) * size.y};
+    }
+    if (points > 2) draw->AddPolyline(ring, points, colors[static_cast<int>(terrainBrush_)], 0, 1.5f);
+
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        ImGui::SetWindowFocus();
+        sculpting_ = true;
+        sculptTarget_ = hit->entity;
+        sculptBefore_.clear();
+        flattenHeight_ = hit->voxel.y;
+        lastSculptTime_ = -1.0;
+    }
+    // El pincel se aplica a ritmo fijo mientras se mantiene pulsado (no depende de los FPS).
+    if (sculpting_ && hit->entity == sculptTarget_ && ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
+        ImGui::GetTime() - lastSculptTime_ >= 0.06) {
+        lastSculptTime_ = ImGui::GetTime();
+        applyTerrainBrush(*hit);
+    }
+}
+
+void EditorView::drawTerrainComponent(ge3d::Entity& entity, const ge3d::Entity& frameStart) {
+    auto& terrain = *entity.terrain;
+    if (draftOwner_ != entity.id) {
+        terrainDraft_ = terrain.settings;
+        draftOwner_ = entity.id;
+    }
+    auto& draft = terrainDraft_;
+    const float labelWidth = std::max(70.0f, ImGui::GetContentRegionAvail().x * 0.38f);
+    const auto row = [&](const char* label) {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(label);
+        ImGui::SameLine(labelWidth);
+        ImGui::SetNextItemWidth(-1);
+    };
+
+    if (terrain.voxels) {
+        const auto& grid = *terrain.voxels;
+        ImGui::TextDisabled("%d x %d x %d voxeles  (%d chunks de 32)", grid.sizeX(), grid.sizeY(), grid.sizeZ(), grid.chunkCount());
+        ImGui::TextDisabled("%.0f x %.0f x %.0f m", grid.sizeX() * terrain.settings.voxelSize,
+                            grid.sizeY() * terrain.settings.voxelSize, grid.sizeZ() * terrain.settings.voxelSize);
+    }
+    if (terrainStats_.terrains > 0) {
+        ImGui::TextDisabled("Vista: %d/%d chunks, %zu caras", terrainStats_.visibleChunks, terrainStats_.chunks, terrainStats_.visibleQuads);
+        if (terrainStats_.pendingChunks > 0) ImGui::TextDisabled("Mallando: %d chunks pendientes", terrainStats_.pendingChunks);
+    }
+
+    ImGui::SeparatorText("Generador");
+    int seed = static_cast<int>(draft.generator.seed & 0x7FFFFFFF);
+    row("Semilla");
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - ImGui::GetFrameHeight() * 2.6f);
+    if (ImGui::InputInt("##semilla", &seed, 1, 100)) draft.generator.seed = static_cast<std::uint32_t>(std::max(0, seed));
+    ImGui::SameLine();
+    if (ImGui::Button("Azar")) draft.generator.seed = static_cast<std::uint32_t>(ge3d::Uuid::generate().low & 0x7FFFFFFF);
+    const float maxHeight = static_cast<float>(draft.chunksY * ge3d::VoxelGrid::chunkSize);
+    row("Altura base");
+    ImGui::SliderFloat("##base", &draft.generator.baseHeight, 0.0f, maxHeight, "%.0f vox");
+    row("Relieve");
+    ImGui::SliderFloat("##amplitud", &draft.generator.amplitude, 0.0f, maxHeight * 0.75f, "%.0f vox");
+    row("Anchura colinas");
+    ImGui::SliderFloat("##escala", &draft.generator.scale, 4.0f, 256.0f, "%.0f vox", ImGuiSliderFlags_Logarithmic);
+    row("Detalle");
+    ImGui::SliderInt("##octavas", &draft.generator.octaves, 1, 8);
+    row("Nivel del agua");
+    ImGui::SliderInt("##agua", &draft.generator.waterLevel, 0, static_cast<int>(maxHeight), draft.generator.waterLevel ? "%d vox" : "sin agua");
+
+    const auto materialRow = [&](const char* label, ge3d::MaterialId& material) {
+        ImGui::PushID(label);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(label);
+        ImGui::SameLine(labelWidth);
+        if (materialSwatch("##muestra", material, false, ImGui::GetFrameHeight() - 2)) ImGui::OpenPopup("materiales");
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", materialName(material));
+        if (ImGui::BeginPopup("materiales")) {
+            if (materialPicker(material, ImGui::GetFrameHeight() * 1.4f, 6)) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+        ImGui::PopID();
+    };
+    materialRow("Superficie", draft.generator.top);
+    materialRow("Subsuelo", draft.generator.under);
+    materialRow("Roca", draft.generator.deep);
+    materialRow("Orilla", draft.generator.shore);
+    materialRow("Agua", draft.generator.water);
+
+    ImGui::SeparatorText("Tamano");
+    row("Chunks X / Z");
+    int horizontal[2] = {draft.chunksX, draft.chunksZ};
+    if (ImGui::SliderInt2("##chunksxz", horizontal, 1, ge3d::VoxelGrid::maxChunksXZ)) {
+        draft.chunksX = horizontal[0];
+        draft.chunksZ = horizontal[1];
+    }
+    row("Chunks Y");
+    ImGui::SliderInt("##chunksy", &draft.chunksY, 1, ge3d::VoxelGrid::maxChunksY);
+    row("Tamano del voxel");
+    static const float voxelSizes[] = {0.25f, 0.5f, 1.0f, 2.0f};
+    static const char* voxelNames[] = {"0,25 m", "0,5 m", "1 m", "2 m"};
+    int voxelIndex = draft.voxelSize < 0.375f ? 0 : draft.voxelSize < 0.75f ? 1 : draft.voxelSize < 1.5f ? 2 : 3;
+    if (ImGui::Combo("##voxel", &voxelIndex, voxelNames, 4)) draft.voxelSize = voxelSizes[voxelIndex];
+
+    ImGui::Spacing();
+    const bool changed = draft != terrain.settings;
+    const float buttonWidth = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 2) / 3;
+    if (ImGui::Button("Generar", {buttonWidth, 0})) {
+        const auto started = std::chrono::steady_clock::now();
+        std::optional<ge3d::Entity> before = frameStart;
+        entity.terrain = ge3d::makeTerrain(draft);
+        commitModification(before, "Generar terreno");
+        const auto elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+        char message[96];
+        std::snprintf(message, sizeof message, "Terreno generado en %.0f ms", elapsed);
+        log(message);
+    }
+    ImGui::SetItemTooltip("Crea el relieve con esta configuracion. Sustituye las ediciones a mano (se puede deshacer).");
+    ImGui::SameLine();
+    if (ImGui::Button("Plano", {buttonWidth, 0})) {
+        std::optional<ge3d::Entity> before = frameStart;
+        entity.terrain = ge3d::TerrainComponent{draft, ge3d::makeFlatTerrain(draft, static_cast<int>(draft.generator.baseHeight),
+                                                                             draft.generator.top)};
+        commitModification(before, "Terreno plano");
+    }
+    ImGui::SetItemTooltip("Terreno llano a la altura base, para esculpirlo a mano con la herramienta Terreno (T)");
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!changed);
+    if (ImGui::Button("Revertir", {buttonWidth, 0})) draft = terrain.settings;
+    ImGui::EndDisabled();
+    if (changed) ImGui::TextDisabled("Hay cambios sin aplicar: pulsa Generar");
 }
 
 // --- Cámara ----------------------------------------------------------------------------------
@@ -485,8 +854,12 @@ std::optional<EditorView::Hit> EditorView::raycast(ImVec2 mouse, ImVec2 origin, 
     const auto ray = mouseRay(mouse, origin, size);
     std::optional<Hit> best;
     for (const auto& entity : scene_.entities()) {
+        if (entity.terrain) {
+            if (auto hit = raycastTerrain(entity, ray); hit && (!best || hit->distance < best->distance)) best = hit;
+        }
+        if (!entity.shape) continue;
         const auto model = modelMatrix(entity.transform);
-        const auto& mesh = meshOf(entity.primitive);
+        const auto& mesh = meshOf(entity.shape->primitive);
         for (const auto& triangle : mesh.triangles) {
             const auto point = [&](std::uint32_t index) {
                 return glm::vec3(model * glm::vec4(vector(mesh.positions[index]), 1));
@@ -614,24 +987,24 @@ void EditorView::handleBuildTool(ImDrawList* draw, ImVec2 origin, ImVec2 size, b
     const auto& io = ImGui::GetIO();
     const ImU32 white = IM_COL32(255, 255, 255, 230);
     const ImU32 red = IM_COL32(255, 90, 80, 240);
-    auto ghost = paletteColor(paintColor_);
-    ghost.w = 0.45f;
-    const ImU32 ghostFill = ImGui::GetColorU32(ghost);
+    const ImU32 ghostFill = previewFill;
 
-    // Borrar (Ctrl): marca en rojo las piezas tocadas y las elimina al soltar.
+    // Borrar (Ctrl): marca en rojo las piezas tocadas y las elimina al soltar. El terreno no se borra
+    // con este pincel (para eso está la herramienta Terreno).
     if (erasing_ || (canUseMouse && io.KeyCtrl && !building_)) {
-        const auto hit = canUseMouse ? raycast(io.MousePos, origin, size) : std::nullopt;
+        auto hit = canUseMouse ? raycast(io.MousePos, origin, size) : std::nullopt;
+        if (hit && hit->terrain) hit.reset();
         if (canUseMouse && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) erasing_ = true;
         if (erasing_ && hit && ImGui::IsMouseDown(ImGuiMouseButton_Left)) eraseStroke_.insert(hit->entity);
         for (const auto id : eraseStroke_) {
-            if (const auto* entity = scene_.find(id)) {
-                drawPieceOutline(draw, entity->primitive, modelMatrix(entity->transform), origin, size, red,
+            if (const auto* entity = scene_.find(id); entity && entity->shape) {
+                drawPieceOutline(draw, entity->shape->primitive, modelMatrix(entity->transform), origin, size, red,
                                  IM_COL32(255, 60, 50, 90));
             }
         }
         if (hit && !eraseStroke_.contains(hit->entity)) {
-            if (const auto* entity = scene_.find(hit->entity)) {
-                drawPieceOutline(draw, entity->primitive, modelMatrix(entity->transform), origin, size, red, 0);
+            if (const auto* entity = scene_.find(hit->entity); entity && entity->shape) {
+                drawPieceOutline(draw, entity->shape->primitive, modelMatrix(entity->transform), origin, size, red, 0);
             }
         }
         return;
@@ -680,8 +1053,8 @@ void EditorView::finishBuildStroke() {
                                       : "Construir " + std::to_string(cells.size()) + " piezas";
     std::size_t index = scene_.entities().size();
     for (const auto& cell : cells) {
-        auto entity = scene_.makeEntity(prefix + std::to_string(++count), buildShape_, cellTransform(cell));
-        entity.faces.fill(paintColor_);
+        auto entity = scene_.makeEntity(prefix + std::to_string(++count), cellTransform(cell));
+        entity.shape = ge3d::makeShape(buildShape_, paintMaterial_);
         command.changes.push_back({std::nullopt, std::move(entity), index++});
     }
     execute(std::move(command));
@@ -706,13 +1079,13 @@ void EditorView::finishEraseStroke() {
 
 void EditorView::paintAt(const Hit& hit, bool wholePiece) {
     auto* entity = scene_.find(hit.entity);
-    if (!entity) return;
-    auto faces = entity->faces;
-    if (wholePiece) faces.fill(paintColor_);
-    else faces[hit.face] = paintColor_;
-    if (faces == entity->faces) return;
+    if (!entity || !entity->shape || hit.terrain) return;
+    auto materials = entity->shape->materials;
+    if (wholePiece) materials.fill(paintMaterial_);
+    else materials[hit.face] = paintMaterial_;
+    if (materials == entity->shape->materials) return;
     paintStroke_.try_emplace(entity->id, *entity);
-    entity->faces = faces;
+    entity->shape->materials = materials;
 }
 
 void EditorView::finishPaintStroke() {
@@ -760,7 +1133,7 @@ void EditorView::commitModification(std::optional<ge3d::Entity>& before, const c
 void EditorView::createPrimitive(ge3d::Primitive primitive) {
     const bool box = primitive == ge3d::Primitive::box;
     const auto count = std::count_if(scene_.entities().begin(), scene_.entities().end(),
-                                     [&](const ge3d::Entity& entity) { return entity.primitive == primitive; });
+                                     [&](const ge3d::Entity& entity) { return entity.shape && entity.shape->primitive == primitive; });
     ge3d::Transform transform;
     // Se coloca donde mira la cámara, ajustado a la cuadrícula y apoyado sobre el suelo.
     transform.position = {std::round(pivot_.x), 0.5f, std::round(pivot_.z)};
@@ -820,7 +1193,9 @@ void EditorView::redo() {
 void EditorView::togglePlay() {
     if (editInProgress()) return;
     if (!isPlaying()) {
+        // La escena de edición se aparta intacta; Play trabaja sobre una copia con sus propios vóxeles.
         playSnapshot_ = scene_;
+        scene_ = scene_.deepCopy();
         playHistory_.clear();
         paused_ = false;
         playFrames_ = 0;
@@ -973,6 +1348,9 @@ void EditorView::handleShortcuts() {
         if (ImGui::Shortcut(ImGuiKey_R, once)) tool_ = Tool::scale;
         if (ImGui::Shortcut(ImGuiKey_B, once)) tool_ = Tool::paint;
         if (ImGui::Shortcut(ImGuiKey_C, once)) tool_ = Tool::build;
+        if (ImGui::Shortcut(ImGuiKey_T, once)) tool_ = Tool::terrain;
+        if (tool_ == Tool::terrain && ImGui::Shortcut(ImGuiKey_LeftBracket, once)) terrainRadius_ = std::max(1, terrainRadius_ - 1);
+        if (tool_ == Tool::terrain && ImGui::Shortcut(ImGuiKey_RightBracket, once)) terrainRadius_ = std::min(12, terrainRadius_ + 1);
         if (tool_ == Tool::build && ImGui::Shortcut(ImGuiKey_Space, once)) buildRotation_ = (buildRotation_ + 1) % 4;
         if (ImGui::Shortcut(ImGuiKey_F, once)) focusSelection();
     }
@@ -1015,6 +1393,14 @@ void EditorView::drawMenuBar() {
     if (ImGui::BeginMenu("Objeto")) {
         if (ImGui::MenuItem("Caja")) createPrimitive(ge3d::Primitive::box);
         if (ImGui::MenuItem("Rampa")) createPrimitive(ge3d::Primitive::ramp);
+        ImGui::Separator();
+        if (ImGui::MenuItem("Terreno procedural")) createTerrain();
+        if (ImGui::MenuItem("Objeto vacio")) {
+            auto entity = scene_.makeEntity("Objeto", ge3d::Transform{{std::round(pivot_.x), 0, std::round(pivot_.z)}, {}, {1, 1, 1}});
+            const auto id = entity.id;
+            execute(ge3d::makeCreateCommand(scene_, std::move(entity)));
+            selected_ = id;
+        }
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Ventana")) {
@@ -1056,6 +1442,8 @@ void EditorView::drawToolbar() {
             {Tool::build, Icon::build, "##construir", "Construir (C)\nClic: coloca una pieza en la celda\n"
                                                       "Arrastre: coloca un trazo\nShift+arrastre: rellena un rectangulo\n"
                                                       "Ctrl+arrastre: borra piezas\nEspacio: gira la pieza 90 grados"},
+            {Tool::terrain, Icon::terrain, "##terreno", "Terreno (T)\nPinceles de voxeles: elevar, excavar, pintar y aplanar\n"
+                                                        "Mantener pulsado para seguir aplicando\n[ y ]: tamano del pincel"},
         };
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {1.0f, 0.0f});
         for (const auto& item : tools) {
@@ -1233,6 +1621,7 @@ void EditorView::drawHierarchy() {
         if (ImGui::BeginPopup("crear_objeto")) {
             if (ImGui::MenuItem("Caja")) createPrimitive(ge3d::Primitive::box);
             if (ImGui::MenuItem("Rampa")) createPrimitive(ge3d::Primitive::ramp);
+            if (ImGui::MenuItem("Terreno")) createTerrain();
             ImGui::EndPopup();
         }
         ImGui::SameLine();
@@ -1252,9 +1641,8 @@ void EditorView::drawHierarchy() {
                     ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen |
                                                ImGuiTreeNodeFlags_SpanAvailWidth;
                     if (selected_ == entity.id) flags |= ImGuiTreeNodeFlags_Selected;
-                    const bool box = entity.primitive == ge3d::Primitive::box;
                     treeItem(reinterpret_cast<const void*>(static_cast<std::uintptr_t>(entity.id)), displayName(entity),
-                             box ? Icon::cube : Icon::ramp, ImGui::GetColorU32(gray(0.75f)), flags);
+                             entityIcon(entity), ImGui::GetColorU32(gray(0.75f)), flags);
                     if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) selected_ = entity.id;
                     if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) focusSelection();
                     ImGui::PushID(static_cast<int>(entity.id));
@@ -1276,6 +1664,7 @@ void EditorView::drawHierarchy() {
             if (ImGui::BeginPopupContextWindow("crear", ImGuiPopupFlags_MouseButtonRight | ImGuiPopupFlags_NoOpenOverItems)) {
                 if (ImGui::MenuItem("Crear caja")) createPrimitive(ge3d::Primitive::box);
                 if (ImGui::MenuItem("Crear rampa")) createPrimitive(ge3d::Primitive::ramp);
+                if (ImGui::MenuItem("Crear terreno")) createTerrain();
                 ImGui::EndPopup();
             }
         }
@@ -1303,12 +1692,10 @@ void EditorView::drawInspector() {
         }
         ImGui::PushID(static_cast<int>(entity->id));
         const ge3d::Entity frameStart = *entity;
-        const bool box = entity->primitive == ge3d::Primitive::box;
-
         // Cabecera: icono y nombre.
         const float iconSize = ImGui::GetFrameHeight();
         ImGui::Dummy({iconSize, iconSize});
-        drawIcon(ImGui::GetWindowDrawList(), box ? Icon::cube : Icon::ramp,
+        drawIcon(ImGui::GetWindowDrawList(), entityIcon(*entity),
                  {(ImGui::GetItemRectMin().x + ImGui::GetItemRectMax().x) * 0.5f,
                   (ImGui::GetItemRectMin().y + ImGui::GetItemRectMax().y) * 0.5f},
                  iconSize * 0.4f, ImGui::GetColorU32(gray(0.85f)));
@@ -1324,7 +1711,7 @@ void EditorView::drawInspector() {
         }
         ImGui::Spacing();
 
-        // Componente Transformación.
+        // Componente Transformación (siempre presente).
         if (componentHeader("Transformacion", boldFont_)) {
             bool activated = false;
             bool deactivated = false;
@@ -1337,65 +1724,109 @@ void EditorView::drawInspector() {
             ImGui::Spacing();
         }
 
-        // Componente Forma.
-        if (componentHeader("Forma", boldFont_)) {
-            const float labelWidth = std::max(70.0f, ImGui::GetContentRegionAvail().x * 0.30f);
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextUnformatted("Primitiva");
-            ImGui::SameLine(labelWidth);
-            ImGui::SetNextItemWidth(-1);
-            int primitive = box ? 0 : 1;
-            if (ImGui::Combo("##primitiva", &primitive, "Caja\0Rampa\0")) {
-                std::optional<ge3d::Entity> before = frameStart;
-                entity->primitive = primitive == 0 ? ge3d::Primitive::box : ge3d::Primitive::ramp;
-                commitModification(before, "Cambiar forma");
+        // Los componentes se quitan con clic derecho en su cabecera.
+        enum class Removal { none, shape, terrain };
+        Removal removal = Removal::none;
+        const auto removeMenu = [&](const char* id, Removal kind) {
+            if (ImGui::BeginPopupContextItem(id)) {
+                if (ImGui::MenuItem("Quitar componente")) removal = kind;
+                ImGui::EndPopup();
             }
+        };
+
+        // Componente Forma: primitiva y un material por cara.
+        if (entity->shape) {
+            const bool open = componentHeader("Forma", boldFont_);
+            removeMenu("forma_menu", Removal::shape);
+            if (open) {
+                auto& shape = *entity->shape;
+                const float labelWidth = std::max(70.0f, ImGui::GetContentRegionAvail().x * 0.34f);
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted("Primitiva");
+                ImGui::SameLine(labelWidth);
+                ImGui::SetNextItemWidth(-1);
+                int primitive = shape.primitive == ge3d::Primitive::box ? 0 : 1;
+                if (ImGui::Combo("##primitiva", &primitive, "Caja\0Rampa\0")) {
+                    std::optional<ge3d::Entity> before = frameStart;
+                    shape.primitive = primitive == 0 ? ge3d::Primitive::box : ge3d::Primitive::ramp;
+                    commitModification(before, "Cambiar forma");
+                }
+                ImGui::SeparatorText("Materiales");
+                const float swatch = ImGui::GetFrameHeight() - 2;
+                const auto faceRow = [&](const char* label, int face) {
+                    ImGui::PushID(face);
+                    ImGui::AlignTextToFramePadding();
+                    ImGui::TextUnformatted(label);
+                    ImGui::SameLine(labelWidth);
+                    const auto shown = shape.materials[face < 0 ? 0 : static_cast<std::size_t>(face)];
+                    if (materialSwatch("##muestra", shown, false, swatch)) ImGui::OpenPopup("materiales");
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("%s", materialName(shown));
+                    if (ImGui::BeginPopup("materiales")) {
+                        auto chosen = shown;
+                        if (materialPicker(chosen, swatch * 1.4f, 6)) {
+                            std::optional<ge3d::Entity> before = frameStart;
+                            if (face < 0) shape.materials.fill(chosen);
+                            else shape.materials[static_cast<std::size_t>(face)] = chosen;
+                            commitModification(before, "Cambiar material");
+                            paintMaterial_ = chosen;
+                            ImGui::CloseCurrentPopup();
+                        }
+                        ImGui::EndPopup();
+                    }
+                    ImGui::PopID();
+                };
+                faceRow("Toda la pieza", -1);
+                ImGui::Separator();
+                for (std::uint32_t face = 0; face < ge3d::faceCount(shape.primitive); ++face) {
+                    faceRow(ge3d::faceName(shape.primitive, face), static_cast<int>(face));
+                }
+                ImGui::Spacing();
+            }
+        }
+
+        // Componente Terreno: generador procedural y tamaño (los pinceles están en la herramienta T).
+        if (entity->terrain) {
+            const bool open = componentHeader("Terreno", boldFont_);
+            removeMenu("terreno_menu", Removal::terrain);
+            if (open) drawTerrainComponent(*entity, frameStart);
             ImGui::Spacing();
         }
 
-        // Componente Colores: un color de la paleta por cara.
-        if (componentHeader("Colores", boldFont_)) {
-            const float labelWidth = std::max(70.0f, ImGui::GetContentRegionAvail().x * 0.30f);
-            const float swatch = ImGui::GetFrameHeight();
-            const auto faceRow = [&](const char* label, int face) {
-                ImGui::PushID(face);
-                ImGui::AlignTextToFramePadding();
-                ImGui::TextUnformatted(label);
-                ImGui::SameLine(labelWidth);
-                const auto shown = entity->faces[face < 0 ? 0 : static_cast<std::size_t>(face)];
-                if (paletteSwatch("##muestra", shown, false, swatch)) ImGui::OpenPopup("paleta");
-                ImGui::SameLine();
-                ImGui::TextDisabled("%s", ge3d::defaultPalette[shown].name);
-                if (ImGui::BeginPopup("paleta")) {
-                    auto chosen = shown;
-                    if (palettePicker(chosen, swatch, 8)) {
-                        std::optional<ge3d::Entity> before = frameStart;
-                        if (face < 0) entity->faces.fill(chosen);
-                        else entity->faces[static_cast<std::size_t>(face)] = chosen;
-                        commitModification(before, "Pintar");
-                        paintColor_ = chosen;
-                        ImGui::CloseCurrentPopup();
-                    }
-                    ImGui::EndPopup();
-                }
-                ImGui::PopID();
-            };
-            faceRow("Toda la pieza", -1);
-            ImGui::Separator();
-            for (std::uint32_t face = 0; face < ge3d::faceCount(entity->primitive); ++face) {
-                faceRow(ge3d::faceName(entity->primitive, face), static_cast<int>(face));
-            }
-            ImGui::Spacing();
+        if (removal != Removal::none) {
+            std::optional<ge3d::Entity> before = frameStart;
+            if (removal == Removal::shape) entity->shape.reset();
+            if (removal == Removal::terrain) entity->terrain.reset();
+            commitModification(before, "Quitar componente");
         }
 
         ImGui::Separator();
         ImGui::Spacing();
         const float buttonWidth = std::min(ImGui::GetContentRegionAvail().x, 220 * scale_);
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (ImGui::GetContentRegionAvail().x - buttonWidth) * 0.5f);
-        ImGui::BeginDisabled();
-        ImGui::Button("Agregar componente", {buttonWidth, 0});
-        ImGui::EndDisabled();
-        ImGui::SetItemTooltip("Llega con la etapa 3: scripts Luau, y la 4: fisica y audio");
+        if (ImGui::Button("Agregar componente", {buttonWidth, 0})) ImGui::OpenPopup("agregar_componente");
+        if (ImGui::BeginPopup("agregar_componente")) {
+            std::optional<ge3d::Entity> before = frameStart;
+            bool added = false;
+            if (ImGui::MenuItem("Forma: caja", nullptr, false, !entity->shape)) {
+                entity->shape = ge3d::makeShape(ge3d::Primitive::box, paintMaterial_);
+                added = true;
+            }
+            if (ImGui::MenuItem("Forma: rampa", nullptr, false, !entity->shape)) {
+                entity->shape = ge3d::makeShape(ge3d::Primitive::ramp, paintMaterial_);
+                added = true;
+            }
+            if (ImGui::MenuItem("Terreno", nullptr, false, !entity->terrain)) {
+                entity->terrain = ge3d::makeTerrain(newTerrain_);
+                added = true;
+            }
+            ImGui::Separator();
+            ImGui::MenuItem("Script (etapa 3)", nullptr, false, false);
+            ImGui::MenuItem("Cuerpo fisico (etapa 4)", nullptr, false, false);
+            ImGui::MenuItem("Fuente de audio (etapa 4)", nullptr, false, false);
+            if (added) commitModification(before, "Agregar componente");
+            ImGui::EndPopup();
+        }
         ImGui::Spacing();
         ImGui::TextDisabled("UUID");
         ImGui::TextDisabled("%s", entity->uuid.toString().c_str());
@@ -1440,21 +1871,23 @@ void EditorView::drawViewport(ImTextureID sceneTexture) {
                 if (ImGui::Combo("##celda", &current, cellNames, 3)) buildCell_ = cells[current];
                 ImGui::SetItemTooltip("Tamano de la celda");
             }
-            if (tool_ == Tool::paint || tool_ == Tool::build) {
-                // Con Pintar y Construir, la paleta queda a mano en la barra de la vista.
+            if (tool_ == Tool::terrain) {
+                // Pinceles del terreno.
                 ImGui::SameLine(0, 16 * scale_);
-                ImGui::AlignTextToFramePadding();
-                ImGui::TextDisabled("Color");
-                ImGui::SameLine();
-                const float swatch = ImGui::GetFrameHeight() * 0.8f;
-                ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (ImGui::GetFrameHeight() - swatch) * 0.5f);
-                for (std::size_t i = 0; i < ge3d::paletteSize; ++i) {
-                    if (i) ImGui::SameLine(0, 3);
-                    ImGui::PushID(static_cast<int>(i));
-                    const auto color = static_cast<ge3d::PaletteIndex>(i);
-                    if (paletteSwatch("##paleta", color, color == paintColor_, swatch)) paintColor_ = color;
-                    ImGui::PopID();
+                static constexpr const char* brushes[] = {"Elevar", "Excavar", "Pintar", "Aplanar"};
+                for (int i = 0; i < 4; ++i) {
+                    if (i) ImGui::SameLine(0, 2);
+                    if (toggleButton(brushes[i], static_cast<int>(terrainBrush_) == i)) terrainBrush_ = static_cast<TerrainBrush>(i);
                 }
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(90 * scale_);
+                ImGui::SliderInt("##radio", &terrainRadius_, 1, 12, "radio %d");
+                ImGui::SetItemTooltip("Radio del pincel en voxeles ([ y ])");
+            }
+            if (tool_ == Tool::paint || tool_ == Tool::build || tool_ == Tool::terrain) {
+                // El material activo queda a mano en la barra de la vista.
+                ImGui::SameLine(0, 16 * scale_);
+                materialStrip();
             }
             // El texto informativo solo se muestra si cabe a la derecha sin tapar los controles.
             const char* info = "320 x 180  |  Perspectiva";
@@ -1559,19 +1992,24 @@ void EditorView::drawViewport(ImTextureID sceneTexture) {
             if (tool_ == Tool::paint) {
                 // Pintar: vista previa de la cara bajo el cursor, trazo con arrastre, cuentagotas con Ctrl.
                 const auto hit = canUseMouse ? raycast(io.MousePos, origin, size) : std::nullopt;
-                if (hit && !io.KeyCtrl) {
-                    if (const auto* target = scene_.find(hit->entity)) {
-                        auto fill = paletteColor(paintColor_);
-                        fill.w = 0.4f;
-                        drawPieceOutline(draw, target->primitive, modelMatrix(target->transform), origin, size,
-                                         IM_COL32(255, 255, 255, 220), ImGui::GetColorU32(fill),
+                if (hit && !io.KeyCtrl && !hit->terrain) {
+                    if (const auto* target = scene_.find(hit->entity); target && target->shape) {
+                        drawPieceOutline(draw, target->shape->primitive, modelMatrix(target->transform), origin, size,
+                                         IM_COL32(255, 255, 255, 220), previewFill,
                                          io.KeyShift ? -1 : static_cast<int>(hit->face));
                     }
                 }
                 if (hit && io.KeyCtrl && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                    // Cuentagotas: toma el material de una cara de pieza o de un vóxel del terreno.
                     if (const auto* target = scene_.find(hit->entity)) {
-                        paintColor_ = target->faces[hit->face];
-                        log(std::string("Color tomado: ") + ge3d::defaultPalette[paintColor_].name);
+                        if (hit->terrain && target->terrain && target->terrain->voxels) {
+                            const auto& grid = *target->terrain->voxels;
+                            const auto voxel = grid.get(hit->voxel.x, hit->voxel.y, hit->voxel.z);
+                            if (voxel > 0) paintMaterial_ = grid.materials()[voxel - 1u];
+                        } else if (target->shape) {
+                            paintMaterial_ = target->shape->materials[hit->face];
+                        }
+                        log(std::string("Material tomado: ") + materialName(paintMaterial_));
                     }
                 } else if (canUseMouse && !io.KeyCtrl && ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
                            (painting_ || ImGui::IsMouseClicked(ImGuiMouseButton_Left))) {
@@ -1581,6 +2019,7 @@ void EditorView::drawViewport(ImTextureID sceneTexture) {
                 }
             }
             if (tool_ == Tool::build) handleBuildTool(draw, origin, size, canUseMouse);
+            if (tool_ == Tool::terrain) handleTerrainTool(draw, origin, size, canUseMouse);
             draw->PopClipRect();
 
             const bool selectTool = tool_ == Tool::move || tool_ == Tool::rotate || tool_ == Tool::scale;
@@ -1595,6 +2034,7 @@ void EditorView::drawViewport(ImTextureID sceneTexture) {
     if (painting_ && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) finishPaintStroke();
     if (building_ && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) finishBuildStroke();
     if (erasing_ && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) finishEraseStroke();
+    if (sculpting_ && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) finishSculpt();
     if (gizmoEdit_ && (!ImGuizmo::IsUsing() || !ImGui::IsMouseDown(ImGuiMouseButton_Left))) {
         const char* label = tool_ == Tool::rotate ? "Rotar" : tool_ == Tool::scale ? "Escalar" : "Mover";
         commitModification(gizmoEdit_, label);

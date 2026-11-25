@@ -6,14 +6,37 @@
 
 namespace ge3d {
 
-Entity Scene::makeEntity(std::string name, Primitive primitive, Transform transform) {
+MaterialId defaultMaterial(Primitive primitive) {
+    return primitive == Primitive::box ? "piedra" : "adoquin";
+}
+
+ShapeComponent makeShape(Primitive primitive) {
+    return makeShape(primitive, defaultMaterial(primitive));
+}
+
+ShapeComponent makeShape(Primitive primitive, const MaterialId& material) {
+    ShapeComponent shape;
+    shape.primitive = primitive;
+    shape.materials.fill(material);
+    return shape;
+}
+
+TerrainComponent makeTerrain(const TerrainSettings& settings) {
+    return {settings, generateTerrain(settings)};
+}
+
+Entity Scene::makeEntity(std::string name, Transform transform) {
     Entity entity;
     entity.id = nextId_++;
     entity.uuid = Uuid::generate();
     entity.name = std::move(name);
-    entity.primitive = primitive;
     entity.transform = transform;
-    entity.faces = defaultFaceColors(primitive);
+    return entity;
+}
+
+Entity Scene::makeEntity(std::string name, Primitive primitive, Transform transform) {
+    auto entity = makeEntity(std::move(name), transform);
+    entity.shape = makeShape(primitive);
     return entity;
 }
 
@@ -53,6 +76,16 @@ void Scene::clear() noexcept {
     entities_.clear();
 }
 
+Scene Scene::deepCopy() const {
+    Scene copy = *this;
+    for (auto& entity : copy.entities_) {
+        if (entity.terrain && entity.terrain->voxels) {
+            entity.terrain->voxels = std::make_shared<VoxelGrid>(*entity.terrain->voxels);
+        }
+    }
+    return copy;
+}
+
 const std::vector<Entity>& Scene::entities() const noexcept {
     return entities_;
 }
@@ -77,7 +110,8 @@ std::optional<std::size_t> Scene::indexOf(EntityId id) const noexcept {
 
 Scene makeStarterScene() {
     Scene scene;
-    scene.create("Floor", Primitive::box, {{0, -0.25f, 0}, {}, {8, 0.5f, 8}});
+    const auto floor = scene.create("Floor", Primitive::box, {{0, -0.25f, 0}, {}, {8, 0.5f, 8}});
+    scene.find(floor)->shape->materials.fill("cesped");
     scene.create("Crate", Primitive::box, {{0, 0.5f, 0}, {}, {1, 1, 1}});
     scene.create("Ramp", Primitive::ramp, {{2, 0.5f, 1}, {}, {2, 1, 2}});
     return scene;

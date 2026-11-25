@@ -21,7 +21,7 @@ target_include_directories(ge3d_editor_widgets SYSTEM PUBLIC "${imgui_SOURCE_DIR
 target_link_libraries(ge3d_editor_widgets PRIVATE Vulkan::Vulkan glfw)
 target_link_libraries(ge3d_vulkan_editor PRIVATE ge3d::runtime ge3d_editor_widgets Vulkan::Vulkan glfw GPUOpen::VulkanMemoryAllocator)
 target_include_directories(ge3d_vulkan_editor SYSTEM PRIVATE "${glm_SOURCE_DIR}")
-target_sources(ge3d_vulkan_editor PRIVATE vma.cpp EditorView.cpp EditorLog.cpp)
+target_sources(ge3d_vulkan_editor PRIVATE vma.cpp EditorView.cpp EditorLog.cpp MaterialTextures.cpp TerrainRenderer.cpp)
 # vma.cpp solo compila la implementación de VulkanMemoryAllocator (código externo).
 if(NOT MSVC)
     set_source_files_properties(vma.cpp PROPERTIES COMPILE_OPTIONS "-w")
@@ -30,16 +30,26 @@ endif()
 find_program(GE3D_SLANGC NAMES slangc HINTS "$ENV{VULKAN_SDK}/Bin" REQUIRED)
 set(GE3D_SHADER_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/shaders")
 file(MAKE_DIRECTORY "${GE3D_SHADER_OUTPUT_DIR}")
-foreach(stage vertex fragment)
+# Puntos de entrada de shaders/scene.slang: archivo de salida, función y etapa.
+set(GE3D_SHADER_ENTRIES
+    "vertex|vertexMain|vertex"
+    "voxel|voxelVertexMain|vertex"
+    "fragment|fragmentMain|fragment"
+)
+foreach(entry IN LISTS GE3D_SHADER_ENTRIES)
+    string(REPLACE "|" ";" parts "${entry}")
+    list(GET parts 0 name)
+    list(GET parts 1 function)
+    list(GET parts 2 stage)
     add_custom_command(
-        OUTPUT "${GE3D_SHADER_OUTPUT_DIR}/scene.${stage}.spv"
+        OUTPUT "${GE3D_SHADER_OUTPUT_DIR}/scene.${name}.spv"
         COMMAND "${GE3D_SLANGC}" "${CMAKE_CURRENT_SOURCE_DIR}/shaders/scene.slang"
-            -entry ${stage}Main -stage ${stage} -target spirv -matrix-layout-column-major
-            -o "${GE3D_SHADER_OUTPUT_DIR}/scene.${stage}.spv"
+            -entry ${function} -stage ${stage} -target spirv -matrix-layout-column-major
+            -o "${GE3D_SHADER_OUTPUT_DIR}/scene.${name}.spv"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/scene.slang"
         VERBATIM
     )
-    list(APPEND GE3D_SHADER_BINARIES "${GE3D_SHADER_OUTPUT_DIR}/scene.${stage}.spv")
+    list(APPEND GE3D_SHADER_BINARIES "${GE3D_SHADER_OUTPUT_DIR}/scene.${name}.spv")
 endforeach()
 add_custom_target(ge3d_vulkan_shaders DEPENDS ${GE3D_SHADER_BINARIES})
 add_dependencies(ge3d_vulkan_editor ge3d_vulkan_shaders)

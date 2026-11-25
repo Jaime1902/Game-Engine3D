@@ -4,7 +4,7 @@ Motor de escritorio para construir, programar y jugar escenas 3D pixel art desde
 
 ## Estado del repositorio
 
-El runtime C++ genera mallas de caja y rampa, identifica cada entidad con un UUID, guarda y abre escenas en JSON y lleva un historial de deshacer y rehacer. El editor Vulkan tiene la distribución clásica de un editor de escenas: Jerarquía, Escena, Inspector, Proyecto y Consola, con barra de herramientas y modo Play. El jugador de consola permite comprobar el arranque del runtime. Los scripts Luau, la física y el audio corresponden a etapas posteriores. El avance por etapas está en [docs/roadmap.md](docs/roadmap.md).
+El runtime C++ organiza cada objeto en componentes (Transformación, Forma y Terreno), genera y malla terrenos de vóxeles, carga materiales con texturas PNG, guarda y abre escenas en JSON y lleva un historial de deshacer y rehacer. El editor Vulkan tiene la distribución clásica de un editor de escenas: Jerarquía, Escena, Inspector, Proyecto y Consola, con barra de herramientas y modo Play. El jugador de consola permite comprobar el arranque del runtime. Los scripts Luau, la física y el audio corresponden a etapas posteriores. El avance por etapas está en [docs/roadmap.md](docs/roadmap.md).
 
 ## Compilación
 
@@ -31,26 +31,49 @@ El editor requiere una GPU con Vulkan 1.3, dynamic rendering y synchronization2.
 
 | Panel | Para qué sirve |
 |---|---|
-| **Jerarquía** (izquierda) | Objetos de la escena. **+** crea objetos, el buscador filtra, clic derecho para duplicar o eliminar, doble clic para enfocar |
+| **Jerarquía** (izquierda) | Objetos de la escena. **+** crea cajas, rampas y terrenos, el buscador filtra, clic derecho para duplicar o eliminar, doble clic para enfocar |
 | **Escena** (centro) | Vista 320 × 180. Cubo de orientación arriba a la derecha: clic en una cara para alinear la cámara. El mundo no tiene bordes: la cuadrícula sigue a la cámara, pasa a líneas cada 10 m o 100 m al alejarse y se desvanece con tramado |
-| **Inspector** (derecha) | Nombre, Transformación (posición, rotación, escala), Forma y Colores por cara del objeto seleccionado |
+| **Inspector** (derecha) | Nombre y componentes del objeto: Transformación, Forma (primitiva y material de cada cara) y Terreno (generador y tamaño). **Agregar componente** añade Forma o Terreno; clic derecho en la cabecera de un componente lo quita |
 | **Proyecto** (abajo) | Archivos de `projects/pueblo/Content`. Doble clic en una escena para abrirla |
 | **Consola** (abajo) | Mensajes del editor y de Vulkan, con filtros por tipo |
 
-La barra superior tiene las herramientas **Mano (Q)**, **Mover (W)**, **Rotar (E)**, **Escalar (R)**, **Pintar (B)** y **Construir (C)**, el cambio de ejes Global o Local y **Ajuste**, que mueve en pasos de 0,25 y rota en pasos de 15°. Con Pintar, la paleta de 24 colores aparece en la barra de la vista y la cara bajo el cursor se resalta con el color elegido. Todo un trazo se deshace de una vez. Con Construir se colocan bloques o rampas en una cuadrícula de 0,5, 1 o 2 m: sobre el suelo o pegados a la cara de otra pieza, con el color elegido de la paleta. Las celdas ocupadas se marcan en rojo y se saltan. Las caras guardan un índice de la paleta (`engine/scene/include/ge3d/Palette.hpp`), así que cambiar un color de la paleta recolorea toda la escena. En el centro están **Play**, **Pausa** y **Paso**. En Play el editor se tiñe de azul, y al detener se descartan los cambios hechos durante el juego. La simulación llegará con las etapas 3 y 4.
+La barra superior tiene las herramientas **Mano (Q)**, **Mover (W)**, **Rotar (E)**, **Escalar (R)**, **Pintar (B)**, **Construir (C)** y **Terreno (T)**, el cambio de ejes Global o Local y **Ajuste**, que mueve en pasos de 0,25 y rota en pasos de 15°. En el centro están **Play**, **Pausa** y **Paso**: en Play el editor se tiñe de azul y al detener se descartan los cambios hechos durante el juego.
+
+Con Pintar, Construir y Terreno, la barra de la vista muestra los materiales con su miniatura; el elegido es el que se pinta, se construye o se esculpe. Cada trazo se deshace de una vez.
 
 | Acción | Atajo |
 |---|---|
 | Orbitar / desplazar / acercar | Clic derecho o Alt + clic izquierdo / botón central / rueda |
-| Pintar (herramienta B) | Clic o arrastre: la cara bajo el cursor · Shift + clic: toda la pieza · Ctrl + clic: tomar el color |
-| Construir (herramienta C) | Clic: una pieza en la celda · Arrastre: trazo · Shift + arrastre: rectángulo · Ctrl + arrastre: borrar · Espacio: girar 90° |
+| Pintar (herramienta B) | Clic o arrastre: la cara bajo el cursor · Shift + clic: toda la pieza · Ctrl + clic: tomar el material (también de un vóxel) |
+| Construir (herramienta C) | Clic: una pieza en la celda · Arrastre: trazo · Shift + arrastre: rectángulo · Ctrl + arrastre: borrar piezas · Espacio: girar 90° |
+| Terreno (herramienta T) | Pinceles Elevar / Excavar / Pintar / Aplanar · mantener pulsado para seguir aplicando · **[** y **]**: radio |
 | Enfocar selección | **F** |
 | Duplicar / eliminar | **Ctrl+D** / **Supr** |
 | Deshacer / rehacer | **Ctrl+Z** / **Ctrl+Y** |
 | Nueva / abrir / guardar escena | **Ctrl+N** / **Ctrl+O** / **Ctrl+S** |
 | Play / pausa / paso | **Ctrl+P** / **Ctrl+Shift+P** / **Ctrl+Alt+P** |
 
-La escena se guarda en `projects/pueblo/Content/scenes/main.scene.json` y se abre sola al iniciar. El título y la Jerarquía muestran `*` cuando hay cambios sin guardar. Al cerrar, abrir otra escena o crear una nueva con cambios pendientes, el editor pregunta si guardar. Si un archivo está dañado, el editor muestra el error y conserva la escena abierta. **Ventana → Restablecer distribución** recupera los paneles cerrados.
+La escena se guarda en `projects/pueblo/Content/scenes/main.scene.json` y se abre sola al iniciar. Los vóxeles de cada terreno se guardan junto a ella, en `scenes/terrains/<uuid>.terrain.json`. El título y la Jerarquía muestran `*` cuando hay cambios sin guardar. Al cerrar, abrir otra escena o crear una nueva con cambios pendientes, el editor pregunta si guardar. Si un archivo está dañado, el editor muestra el error y conserva la escena abierta. **Ventana → Restablecer distribución** recupera los paneles cerrados.
+
+### Materiales y texturas
+
+Las caras y los vóxeles no guardan colores sino **materiales**, definidos en `projects/pueblo/Content/materials.json`:
+
+```json
+{ "id": "cesped", "name": "Cesped", "texture": "textures/cesped_lado.png",
+  "top": "textures/cesped.png", "bottom": "textures/tierra.png", "tint": "#ffffff" }
+```
+
+- `texture` es la textura de los lados; `top` y `bottom` son opcionales (si faltan se usa la de los lados). `tint` multiplica el color.
+- Todas las texturas son PNG cuadrados del mismo tamaño y potencia de dos (el juego inicial es de 16 × 16). Se dibujan con filtro nearest y se repiten **una vez por metro**, así que un muro estirado mantiene el tamaño de sus píxeles.
+- Al guardar `materials.json` o cualquier PNG, el editor recarga las texturas solo (en menos de un segundo). Un id desconocido o un PNG que no carga se ve con cuadros magenta y aparece un aviso en la Consola.
+- `ge3d_texture_gen <carpeta Content>` regenera el juego de texturas inicial (no sobrescribe archivos existentes salvo con `--force`).
+
+### Terreno
+
+**Objeto → Terreno procedural** (o **+** en la Jerarquía) crea un terreno de vóxeles de 128 × 64 × 128 m centrado en el origen. En el Inspector se cambian la semilla, la altura base, el relieve, la anchura de las colinas, el detalle, el nivel del agua, los materiales de cada capa (superficie, subsuelo, roca, orilla, agua) y el tamaño (hasta 512 × 128 × 512 vóxeles, de 0,25 a 2 m). **Generar** crea el relieve con esa configuración; **Plano** deja un terreno llano para esculpirlo a mano. Ambas cosas se pueden deshacer.
+
+La herramienta **Terreno (T)** esculpe sobre cualquier terreno: **Elevar** añade vóxeles del material elegido, **Excavar** los quita, **Pintar** cambia el material de la superficie y **Aplanar** nivela a la altura donde empezó el trazo.
 
 ## Documentación
 
