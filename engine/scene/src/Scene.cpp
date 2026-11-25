@@ -25,6 +25,10 @@ TerrainComponent makeTerrain(const TerrainSettings& settings) {
     return {settings, generateTerrain(settings)};
 }
 
+HeightmapComponent makeHeightmap(const HeightmapSettings& settings) {
+    return {settings, generateHeightmap(settings)};
+}
+
 Entity Scene::makeEntity(std::string name, Transform transform) {
     Entity entity;
     entity.id = nextId_++;
@@ -81,6 +85,9 @@ Scene Scene::deepCopy() const {
     for (auto& entity : copy.entities_) {
         if (entity.terrain && entity.terrain->voxels) {
             entity.terrain->voxels = std::make_shared<VoxelGrid>(*entity.terrain->voxels);
+        }
+        if (entity.heightmap && entity.heightmap->data) {
+            entity.heightmap->data = std::make_shared<Heightmap>(*entity.heightmap->data);
         }
     }
     return copy;

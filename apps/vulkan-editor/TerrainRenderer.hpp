@@ -60,7 +60,7 @@ struct TerrainStats {
     VkDeviceSize gpuBytes{};
 };
 
-// Malla y dibuja los terrenos de vóxeles:
+// Malla y dibuja los terrenos de vóxeles y de malla:
 //  - Solo remalla los chunks cuya revisión cambió, con un presupuesto por fotograma.
 //  - Sube los vértices con un buffer de staging por fotograma en vuelo.
 //  - Comparte un único índice de quads (0 1 2, 0 2 3...) para todos los chunks.
@@ -83,6 +83,9 @@ public:
     // Dibuja los chunks visibles. El pipeline de vóxeles y los descriptores ya deben estar enlazados.
     void draw(VkCommandBuffer command, VkPipelineLayout layout, const glm::mat4& viewProj, const ge3d::Scene& scene,
               const std::function<glm::mat4(const ge3d::Transform&)>& modelMatrix);
+    // Igual para los terrenos de malla, con su pipeline ya enlazado.
+    void drawHeightmaps(VkCommandBuffer command, VkPipelineLayout layout, const glm::mat4& viewProj, const ge3d::Scene& scene,
+                        const std::function<glm::mat4(const ge3d::Transform&)>& modelMatrix, const MaterialLookup& lookup);
     [[nodiscard]] const TerrainStats& stats() const noexcept { return stats_; }
 
 private:
@@ -99,12 +102,28 @@ private:
         std::uint64_t materialsVersion{~0ull};
         bool seen{};
     };
+    struct HeightChunkGpu {
+        std::uint64_t revision{~0ull};
+        GeometryPool::Allocation allocation;
+        float low{};
+        float high{};
+    };
+    struct HeightmapGpu {
+        const ge3d::Heightmap* map{};
+        float cellSize{};
+        std::vector<HeightChunkGpu> chunks;
+        bool seen{};
+    };
     void releaseTerrain(TerrainGpu& terrain, std::uint64_t frame);
+    void releaseHeightmap(HeightmapGpu& terrain, std::uint64_t frame);
 
     GpuContext context_{};
     GeometryPool pool_;
     GpuBuffer quadIndices_;
+    GpuBuffer heightIndices_;
+    std::uint32_t heightIndexCount_{};
     GpuBuffer staging_;
     std::unordered_map<ge3d::EntityId, TerrainGpu> terrains_;
+    std::unordered_map<ge3d::EntityId, HeightmapGpu> heightmaps_;
     TerrainStats stats_;
 };

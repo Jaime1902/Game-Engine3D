@@ -29,11 +29,23 @@ void applyTerrain(Scene& scene, const TerrainChange& change, bool forward) {
     entity->terrain->voxels->setChunkData(change.chunk, forward ? change.after : change.before);
 }
 
+void applyHeightmap(Scene& scene, const HeightmapChange& change, bool forward) {
+    auto* entity = scene.find(change.entity);
+    if (!entity || !entity->heightmap || !entity->heightmap->data) {
+        throw std::logic_error("History: el terreno a modificar no existe");
+    }
+    entity->heightmap->data->setChunkData(change.chunk, forward ? change.after : change.before);
+}
+
 void apply(Scene& scene, const EditCommand& command, bool forward) {
     if (forward) {
         for (const auto& change : command.changes) applyChange(scene, change, true);
         for (const auto& change : command.terrainChanges) applyTerrain(scene, change, true);
+        for (const auto& change : command.heightmapChanges) applyHeightmap(scene, change, true);
     } else {
+        for (auto it = command.heightmapChanges.rbegin(); it != command.heightmapChanges.rend(); ++it) {
+            applyHeightmap(scene, *it, false);
+        }
         for (auto it = command.terrainChanges.rbegin(); it != command.terrainChanges.rend(); ++it) {
             applyTerrain(scene, *it, false);
         }
@@ -115,6 +127,7 @@ std::optional<EditCommand> makeDuplicateCommand(Scene& scene, EntityId id, Vec3 
     copy.uuid = fresh.uuid;
     copy.name = fresh.name;
     if (copy.terrain && copy.terrain->voxels) copy.terrain->voxels = std::make_shared<VoxelGrid>(*copy.terrain->voxels);
+    if (copy.heightmap && copy.heightmap->data) copy.heightmap->data = std::make_shared<Heightmap>(*copy.heightmap->data);
     copy.transform.position.x += offset.x;
     copy.transform.position.y += offset.y;
     copy.transform.position.z += offset.z;

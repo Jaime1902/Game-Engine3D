@@ -27,7 +27,6 @@
 
 namespace {
 
-constexpr float aspect = 320.0f / 180.0f;
 glm::vec3 vector(ge3d::Vec3 v) { return {v.x, v.y, v.z}; }
 
 // --- Colores del tema --------------------------------------------------------------------------
@@ -340,7 +339,7 @@ bool contains(const std::string& text, const char* filter) {
 }
 
 Icon entityIcon(const ge3d::Entity& entity) {
-    if (entity.terrain) return Icon::terrain;
+    if (entity.terrain || entity.heightmap) return Icon::terrain;
     if (entity.shape) return entity.shape->primitive == ge3d::Primitive::box ? Icon::cube : Icon::ramp;
     return Icon::empty;
 }
@@ -538,6 +537,158 @@ std::optional<EditorView::Hit> EditorView::raycastTerrain(const ge3d::Entity& en
     return std::nullopt;
 }
 
+std::optional<EditorView::Hit> EditorView::raycastHeightmap(const ge3d::Entity& entity, const Ray& ray) const {
+    if (!entity.heightmap || !entity.heightmap->data) return std::nullopt;
+    const auto& map = *entity.heightmap->data;
+    const float cell = entity.heightmap->settings.cellSize;
+    const glm::mat4 model = modelMatrix(entity.transform);
+    const glm::mat4 inverse = glm::inverse(model);
+    const glm::vec3 origin = glm::vec3(inverse * glm::vec4(ray.start, 1.0f));
+    const glm::vec3 direction = glm::vec3(inverse * glm::vec4(ray.direction, 0.0f));
+
+    // Caja del terreno en su espacio local (metros): xz del tamaño de la rejilla, y de la altura mínima a la máxima.
+    float low = ge3d::Heightmap::maxHeight, high = -ge3d::Heightmap::maxHeight;
+    for (int chunk = 0; chunk < map.chunkCount(); ++chunk) {
+        const auto range = map.chunkHeightRange(chunk);
+        low = std::min(low, range[0]);
+        high = std::max(high, range[1]);
+    }
+    const glm::vec3 boxMin{0.0f, low - 0.01f, 0.0f};
+    const glm::vec3 boxMax{static_cast<float>(map.cellsX()) * cell, high + 0.01f, static_cast<float>(map.cellsZ()) * cell};
+    float enter = 0.0f, leave = std::numeric_limits<float>::max();
+    for (int axis = 0; axis < 3; ++axis) {
+        if (std::abs(direction[axis]) < 1e-9f) {
+            if (origin[axis] < boxMin[axis] || origin[axis] > boxMax[axis]) return std::nullopt;
+            continue;
+        }
+        float a = (boxMin[axis] - origin[axis]) / direction[axis];
+        float b = (boxMax[axis] - origin[axis]) / direction[axis];
+        if (a > b) std::swap(a, b);
+        enter = std::max(enter, a);
+        leave = std::min(leave, b);
+        if (enter > leave) return std::nullopt;
+    }
+    // Marcha a pasos de media celda y bisección al cruzar la superficie.
+    const auto above = [&](float t) {
+        const glm::vec3 p = origin + direction * t;
+        return p.y - map.surfaceHeight(p.x / cell, p.z / cell);
+    };
+    const float largest = std::max({std::abs(direction.x), std::abs(direction.y), std::abs(direction.z)});
+    const float step = cell * 0.5f / std::max(largest, 1e-6f);
+    float previous = enter;
+    float previousValue = above(enter);
+    if (previousValue < 0.0f) return std::nullopt;   // la cámara está bajo el terreno
+    for (float t = enter + step; previous < leave; t += step) {
+        t = std::min(t, leave);
+        const float value = above(t);
+        if (value <= 0.0f) {
+            float a = previous, b = t;
+            for (int i = 0; i < 12; ++i) {
+                const float middle = (a + b) * 0.5f;
+                (above(middle) > 0.0f ? a : b) = middle;
+            }
+            const glm::vec3 local = origin + direction * b;
+            const auto n = map.normal(static_cast<int>(std::lround(local.x / cell)), static_cast<int>(std::lround(local.z / cell)), cell);
+            Hit hit;
+            hit.entity = entity.id;
+            hit.distance = b;
+            hit.point = ray.start + ray.direction * b;
+            hit.normal = glm::normalize(glm::vec3(glm::transpose(inverse) * glm::vec4(n[0], n[1], n[2], 0.0f)));
+            hit.terrain = true;
+            hit.heightmap = true;
+            return hit;
+        }
+        previous = t;
+        previousValue = value;
+    }
+    return std::nullopt;
+}
+
+void EditorView::createHeightmap() {
+    const auto settings = newHeightmap_;
+    const auto count = std::count_if(scene_.entities().begin(), scene_.entities().end(), [](const ge3d::Entity& entity) {
+        return entity.terrain.has_value() || entity.heightmap.has_value();
+    });
+    // Centrado en el origen; las alturas del generador oscilan alrededor de y = 0.
+    ge3d::Transform transform;
+    const float width = static_cast<float>(settings.chunksX * ge3d::Heightmap::chunkCells) * settings.cellSize;
+    const float depth = static_cast<float>(settings.chunksZ * ge3d::Heightmap::chunkCells) * settings.cellSize;
+    transform.position = {-width * 0.5f, 0.0f, -depth * 0.5f};
+    const auto started = std::chrono::steady_clock::now();
+    auto entity = scene_.makeEntity("Terreno " + std::to_string(count + 1), transform);
+    entity.heightmap = ge3d::makeHeightmap(settings);
+    const auto elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+    const auto id = entity.id;
+    execute(ge3d::makeCreateCommand(scene_, std::move(entity)));
+    selected_ = id;
+    pivot_ = {0.0f, 0.0f, 0.0f};
+    distance_ = std::max(distance_, width * 0.6f);
+    char message[96];
+    std::snprintf(message, sizeof message, "Terreno generado en %.0f ms", elapsed);
+    log(message);
+}
+
+void EditorView::applyHeightBrush(const Hit& hit, float seconds) {
+    auto* entity = scene_.find(sculptTarget_);
+    if (!entity || !entity->heightmap || !entity->heightmap->data) return;
+    auto& map = *entity->heightmap->data;
+    const float cell = entity->heightmap->settings.cellSize;
+    const glm::vec3 local = glm::vec3(glm::inverse(modelMatrix(entity->transform)) * glm::vec4(hit.point, 1.0f));
+    const float cx = local.x / cell, cz = local.z / cell;
+    const float radius = static_cast<float>(terrainRadius_);
+    const int x0 = std::max(0, static_cast<int>(std::floor(cx - radius))), x1 = std::min(map.verticesX() - 1, static_cast<int>(std::ceil(cx + radius)));
+    const int z0 = std::max(0, static_cast<int>(std::floor(cz - radius))), z1 = std::min(map.verticesZ() - 1, static_cast<int>(std::ceil(cz + radius)));
+    if (x0 > x1 || z0 > z1) return;
+
+    // Guarda el contenido previo de cada chunk que use alguno de los vértices tocados (los bordes son compartidos).
+    constexpr int size = ge3d::Heightmap::chunkCells;
+    for (int chunkZ = std::max(0, (z0 - 1) / size); chunkZ <= std::min(map.chunksZ() - 1, z1 / size); ++chunkZ) {
+        for (int chunkX = std::max(0, (x0 - 1) / size); chunkX <= std::min(map.chunksX() - 1, x1 / size); ++chunkX) {
+            const int chunk = map.chunkIndex(chunkX, chunkZ);
+            if (!heightBefore_.contains(chunk)) heightBefore_.emplace(chunk, map.chunkData(chunk));
+        }
+    }
+
+    // Suavizar lee de una copia para que el resultado no dependa del orden del recorrido.
+    std::vector<float> source;
+    const int width = x1 - x0 + 1;
+    if (terrainBrush_ == TerrainBrush::smooth) {
+        source.reserve(static_cast<std::size_t>(width * (z1 - z0 + 1)));
+        for (int z = z0; z <= z1; ++z) {
+            for (int x = x0; x <= x1; ++x) source.push_back(map.height(x, z));
+        }
+    }
+    const auto sourceHeight = [&](int x, int z) {
+        if (x < x0 || x > x1 || z < z0 || z > z1) return map.height(x, z);
+        return source[static_cast<std::size_t>((z - z0) * width + (x - x0))];
+    };
+    // Velocidad: un pincel grande sube más rápido para que el tamaño no cambie la sensación.
+    const float rate = (2.0f + radius * cell * 0.6f) * brushStrength_ * seconds;
+    const float blend = std::min(1.0f, 8.0f * brushStrength_ * seconds);
+    for (int z = z0; z <= z1; ++z) {
+        for (int x = x0; x <= x1; ++x) {
+            const float distance = std::hypot(static_cast<float>(x) - cx, static_cast<float>(z) - cz);
+            if (distance > radius) continue;
+            const float falloff = 0.5f + 0.5f * std::cos(3.14159265f * distance / radius);
+            const float height = map.height(x, z);
+            switch (terrainBrush_) {
+            case TerrainBrush::add: map.setHeight(x, z, height + rate * falloff); break;
+            case TerrainBrush::remove: map.setHeight(x, z, height - rate * falloff); break;
+            case TerrainBrush::flatten: map.setHeight(x, z, height + (flattenLevel_ - height) * blend * falloff); break;
+            case TerrainBrush::smooth: {
+                const float average = (sourceHeight(x - 1, z) + sourceHeight(x + 1, z) + sourceHeight(x, z - 1) +
+                                       sourceHeight(x, z + 1) + sourceHeight(x, z) * 4.0f) / 8.0f;
+                map.setHeight(x, z, height + (average - height) * blend * falloff);
+                break;
+            }
+            case TerrainBrush::paint:
+                map.setWeights(x, z, ge3d::blendTowardLayer(map.weights(x, z), paintLayer_, blend * falloff));
+                break;
+            }
+        }
+    }
+}
+
 void EditorView::createTerrain() {
     auto settings = newTerrain_;
     const auto count = std::count_if(scene_.entities().begin(), scene_.entities().end(),
@@ -614,8 +765,21 @@ void EditorView::applyTerrainBrush(const Hit& hit) {
 void EditorView::finishSculpt() {
     sculpting_ = false;
     const auto* entity = scene_.find(sculptTarget_);
+    if (entity && entity->heightmap && entity->heightmap->data && !heightBefore_.empty()) {
+        static constexpr const char* labels[] = {"Elevar terreno", "Bajar terreno", "Pintar terreno", "Aplanar terreno",
+                                                 "Suavizar terreno"};
+        ge3d::EditCommand command;
+        command.label = labels[static_cast<int>(terrainBrush_)];
+        for (auto& [chunk, before] : heightBefore_) {
+            auto after = entity->heightmap->data->chunkData(chunk);
+            if (after != before) command.heightmapChanges.push_back({entity->id, chunk, std::move(before), std::move(after)});
+        }
+        activeHistory().record(std::move(command));
+    }
+    heightBefore_.clear();
     if (entity && entity->terrain && entity->terrain->voxels && !sculptBefore_.empty()) {
-        static constexpr const char* labels[] = {"Elevar terreno", "Excavar terreno", "Pintar terreno", "Aplanar terreno"};
+        static constexpr const char* labels[] = {"Elevar terreno", "Excavar terreno", "Pintar terreno", "Aplanar terreno",
+                                                 "Suavizar terreno"};
         ge3d::EditCommand command;
         command.label = labels[static_cast<int>(terrainBrush_)];
         for (auto& [chunk, before] : sculptBefore_) {
@@ -633,25 +797,41 @@ void EditorView::handleTerrainTool(ImDrawList* draw, ImVec2 origin, ImVec2 size,
     if (hit && !hit->terrain) hit.reset();
     if (!hit) return;
     const auto* entity = scene_.find(hit->entity);
-    if (!entity || !entity->terrain) return;
+    if (!entity || (!entity->terrain && !entity->heightmap)) return;
+    if (hit->heightmap && !entity->heightmap) return;
 
-    // Vista previa: círculo del pincel sobre la superficie.
-    const float voxel = entity->terrain->settings.voxelSize;
-    const float radius = (static_cast<float>(terrainRadius_) + 0.5f) * voxel;
-    const glm::vec3 n = hit->normal;
-    const glm::vec3 tangent = glm::normalize(glm::abs(n.y) < 0.9f ? glm::cross(n, glm::vec3{0, 1, 0}) : glm::cross(n, glm::vec3{1, 0, 0}));
-    const glm::vec3 bitangent = glm::cross(n, tangent);
+    // Vista previa: círculo del pincel sobre la superficie (en el terreno de malla, pegado al relieve).
     const glm::mat4 clip = projection() * view();
     const ImU32 colors[] = {IM_COL32(120, 230, 120, 230), IM_COL32(255, 100, 90, 230), IM_COL32(255, 255, 255, 230),
-                            IM_COL32(250, 210, 90, 230)};
-    ImVec2 ring[33];
+                            IM_COL32(250, 210, 90, 230), IM_COL32(120, 200, 255, 230)};
+    ImVec2 ring[49];
     int points = 0;
-    for (int i = 0; i <= 32; ++i) {
-        const float angle = static_cast<float>(i) / 32.0f * 6.2831853f;
-        const glm::vec3 world = hit->point + n * 0.02f + (tangent * std::cos(angle) + bitangent * std::sin(angle)) * radius;
+    const auto project = [&](const glm::vec3& world) {
         const glm::vec4 c = clip * glm::vec4(world, 1.0f);
-        if (c.w <= 0.001f) continue;
+        if (c.w <= 0.001f) return;
         ring[points++] = {origin.x + (c.x / c.w * 0.5f + 0.5f) * size.x, origin.y + (0.5f - c.y / c.w * 0.5f) * size.y};
+    };
+    if (hit->heightmap) {
+        const auto& map = *entity->heightmap->data;
+        const float cell = entity->heightmap->settings.cellSize;
+        const glm::mat4 model = modelMatrix(entity->transform);
+        const glm::vec3 local = glm::vec3(glm::inverse(model) * glm::vec4(hit->point, 1.0f));
+        const float radius = static_cast<float>(terrainRadius_) * cell;
+        for (int i = 0; i <= 48; ++i) {
+            const float angle = static_cast<float>(i) / 48.0f * 6.2831853f;
+            const float x = local.x + std::cos(angle) * radius, z = local.z + std::sin(angle) * radius;
+            project(glm::vec3(model * glm::vec4(x, map.surfaceHeight(x / cell, z / cell) + 0.05f, z, 1.0f)));
+        }
+    } else {
+        const float voxel = entity->terrain->settings.voxelSize;
+        const float radius = (static_cast<float>(terrainRadius_) + 0.5f) * voxel;
+        const glm::vec3 n = hit->normal;
+        const glm::vec3 tangent = glm::normalize(glm::abs(n.y) < 0.9f ? glm::cross(n, glm::vec3{0, 1, 0}) : glm::cross(n, glm::vec3{1, 0, 0}));
+        const glm::vec3 bitangent = glm::cross(n, tangent);
+        for (int i = 0; i <= 32; ++i) {
+            const float angle = static_cast<float>(i) / 32.0f * 6.2831853f;
+            project(hit->point + n * 0.02f + (tangent * std::cos(angle) + bitangent * std::sin(angle)) * radius);
+        }
     }
     if (points > 2) draw->AddPolyline(ring, points, colors[static_cast<int>(terrainBrush_)], 0, 1.5f);
 
@@ -659,13 +839,19 @@ void EditorView::handleTerrainTool(ImDrawList* draw, ImVec2 origin, ImVec2 size,
         ImGui::SetWindowFocus();
         sculpting_ = true;
         sculptTarget_ = hit->entity;
+        selected_ = hit->entity;
         sculptBefore_.clear();
+        heightBefore_.clear();
         flattenHeight_ = hit->voxel.y;
+        flattenLevel_ = glm::vec3(glm::inverse(modelMatrix(entity->transform)) * glm::vec4(hit->point, 1.0f)).y;
         lastSculptTime_ = -1.0;
     }
-    // El pincel se aplica a ritmo fijo mientras se mantiene pulsado (no depende de los FPS).
-    if (sculpting_ && hit->entity == sculptTarget_ && ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
-        ImGui::GetTime() - lastSculptTime_ >= 0.06) {
+    if (!sculpting_ || hit->entity != sculptTarget_ || !ImGui::IsMouseDown(ImGuiMouseButton_Left)) return;
+    if (hit->heightmap) {
+        // Terreno de malla: el pincel actúa de forma continua según el tiempo transcurrido.
+        applyHeightBrush(*hit, std::min(ImGui::GetIO().DeltaTime, 0.05f));
+    } else if (ImGui::GetTime() - lastSculptTime_ >= 0.06) {
+        // Vóxeles: a ritmo fijo mientras se mantiene pulsado (no depende de los FPS).
         lastSculptTime_ = ImGui::GetTime();
         applyTerrainBrush(*hit);
     }
@@ -780,6 +966,110 @@ void EditorView::drawTerrainComponent(ge3d::Entity& entity, const ge3d::Entity& 
     if (changed) ImGui::TextDisabled("Hay cambios sin aplicar: pulsa Generar");
 }
 
+void EditorView::drawHeightmapComponent(ge3d::Entity& entity, const ge3d::Entity& frameStart) {
+    auto& terrain = *entity.heightmap;
+    if (heightDraftOwner_ != entity.id) {
+        heightDraft_ = terrain.settings;
+        heightDraftOwner_ = entity.id;
+    }
+    auto& draft = heightDraft_;
+    draft.layers = terrain.settings.layers;   // las capas se aplican al momento, no forman parte del borrador
+    const float labelWidth = std::max(70.0f, ImGui::GetContentRegionAvail().x * 0.38f);
+    const auto row = [&](const char* label) {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(label);
+        ImGui::SameLine(labelWidth);
+        ImGui::SetNextItemWidth(-1);
+    };
+    if (terrain.data) {
+        const auto& map = *terrain.data;
+        ImGui::TextDisabled("%d x %d celdas  (%d chunks de 64)", map.cellsX(), map.cellsZ(), map.chunkCount());
+        ImGui::TextDisabled("%.0f x %.0f m", static_cast<float>(map.cellsX()) * terrain.settings.cellSize,
+                            static_cast<float>(map.cellsZ()) * terrain.settings.cellSize);
+    }
+
+    ImGui::SeparatorText("Capas");
+    ImGui::TextDisabled("Se pintan con la herramienta Terreno (T)");
+    static constexpr const char* layerNames[] = {"Base", "Capa 2", "Capa 3", "Capa 4"};
+    for (int layer = 0; layer < ge3d::Heightmap::layerCount; ++layer) {
+        auto& material = terrain.settings.layers[static_cast<std::size_t>(layer)];
+        ImGui::PushID(layer);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(layerNames[layer]);
+        ImGui::SameLine(labelWidth);
+        if (materialSwatch("##muestra", material, paintLayer_ == layer, ImGui::GetFrameHeight() - 2)) ImGui::OpenPopup("materiales");
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", materialName(material));
+        if (ImGui::BeginPopup("materiales")) {
+            auto chosen = material;
+            if (materialPicker(chosen, ImGui::GetFrameHeight() * 1.4f, 6)) {
+                std::optional<ge3d::Entity> before = frameStart;
+                material = chosen;
+                commitModification(before, "Cambiar capa del terreno");
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+        ImGui::PopID();
+    }
+
+    ImGui::SeparatorText("Generador");
+    int seed = static_cast<int>(draft.generator.seed & 0x7FFFFFFF);
+    row("Semilla");
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - ImGui::GetFrameHeight() * 2.6f);
+    if (ImGui::InputInt("##semilla", &seed, 1, 100)) draft.generator.seed = static_cast<std::uint32_t>(std::max(0, seed));
+    ImGui::SameLine();
+    if (ImGui::Button("Azar")) draft.generator.seed = static_cast<std::uint32_t>(ge3d::Uuid::generate().low & 0x7FFFFFFF);
+    row("Relieve");
+    ImGui::SliderFloat("##amplitud", &draft.generator.amplitude, 0.0f, 80.0f, "%.1f m");
+    row("Anchura colinas");
+    ImGui::SliderFloat("##escala", &draft.generator.scale, 4.0f, 512.0f, "%.0f m", ImGuiSliderFlags_Logarithmic);
+    row("Detalle");
+    ImGui::SliderInt("##octavas", &draft.generator.octaves, 1, 8);
+    row("Roca en pendientes");
+    ImGui::SliderFloat("##roca", &draft.generator.rockSlope, 0.0f, 1.0f, draft.generator.rockSlope > 0 ? "%.2f" : "no pintar");
+
+    ImGui::SeparatorText("Tamano");
+    row("Chunks X / Z");
+    int horizontal[2] = {draft.chunksX, draft.chunksZ};
+    if (ImGui::SliderInt2("##chunksxz", horizontal, 1, ge3d::Heightmap::maxChunks)) {
+        draft.chunksX = horizontal[0];
+        draft.chunksZ = horizontal[1];
+    }
+    row("Tamano de celda");
+    static const float cellSizes[] = {0.25f, 0.5f, 1.0f, 2.0f};
+    static const char* cellNames[] = {"0,25 m", "0,5 m", "1 m", "2 m"};
+    int cellIndex = draft.cellSize < 0.375f ? 0 : draft.cellSize < 0.75f ? 1 : draft.cellSize < 1.5f ? 2 : 3;
+    if (ImGui::Combo("##celda", &cellIndex, cellNames, 4)) draft.cellSize = cellSizes[cellIndex];
+
+    ImGui::Spacing();
+    const bool changed = draft != terrain.settings;
+    const float buttonWidth = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 2) / 3;
+    if (ImGui::Button("Generar", {buttonWidth, 0})) {
+        const auto started = std::chrono::steady_clock::now();
+        std::optional<ge3d::Entity> before = frameStart;
+        entity.heightmap = ge3d::makeHeightmap(draft);
+        commitModification(before, "Generar terreno");
+        const auto elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+        char message[96];
+        std::snprintf(message, sizeof message, "Terreno generado en %.0f ms", elapsed);
+        log(message);
+    }
+    ImGui::SetItemTooltip("Crea el relieve con esta configuracion. Sustituye las ediciones a mano (se puede deshacer).");
+    ImGui::SameLine();
+    if (ImGui::Button("Plano", {buttonWidth, 0})) {
+        std::optional<ge3d::Entity> before = frameStart;
+        entity.heightmap = ge3d::HeightmapComponent{draft, ge3d::makeFlatHeightmap(draft)};
+        commitModification(before, "Terreno plano");
+    }
+    ImGui::SetItemTooltip("Terreno llano para modelarlo a mano con la herramienta Terreno (T)");
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!changed);
+    if (ImGui::Button("Revertir", {buttonWidth, 0})) draft = terrain.settings;
+    ImGui::EndDisabled();
+    if (changed) ImGui::TextDisabled("Hay cambios sin aplicar: pulsa Generar");
+}
+
 // --- Cámara ----------------------------------------------------------------------------------
 
 glm::mat4 EditorView::view() const {
@@ -792,9 +1082,28 @@ glm::mat4 EditorView::view() const {
 constexpr float nearPlane = 0.1f;
 constexpr float farPlane = 2000.0f;
 constexpr float maxDistance = 600.0f;
+constexpr float fieldOfView = 48.0f;   // grados en vertical
+constexpr int sceneMargin = 1;         // píxeles extra por lado para desplazar la imagen sin bordes vacíos
 
 glm::mat4 EditorView::projection() const {
-    return glm::perspectiveRH_NO(glm::radians(48.0f), aspect, nearPlane, farPlane);
+    return glm::perspectiveRH_NO(glm::radians(fieldOfView), aspect_, nearPlane, farPlane);
+}
+
+EditorView::CameraSnap EditorView::cameraSnap() const {
+    if (!style_.snapCamera || style_.pixelSize <= 1) return {};
+    // Tamaño en el mundo de un píxel de la escena a la distancia del punto que se mira. Si la cámara
+    // solo se mueve en múltiplos de ese tamaño, lo que se ve no cambia de píxel al desplazarse; el resto
+    // se compensa moviendo la imagen una fracción de píxel en pantalla (el movimiento sigue siendo suave).
+    const glm::mat4 inverseView = glm::inverse(view());
+    const glm::vec3 right{inverseView[0]};
+    const glm::vec3 up{inverseView[1]};
+    const float texel = 2.0f * distance_ * std::tan(glm::radians(fieldOfView) * 0.5f) / static_cast<float>(sceneSize_.y);
+    if (texel <= 0.0f) return {};
+    const float x = glm::dot(pivot_, right) / texel;
+    const float y = glm::dot(pivot_, up) / texel;
+    const float dx = std::round(x) - x;
+    const float dy = std::round(y) - y;
+    return {(right * dx + up * dy) * texel, {-dx, dy}};
 }
 
 EditorView::GridView EditorView::gridView() const {
@@ -807,12 +1116,25 @@ EditorView::GridView EditorView::gridView() const {
     return {offset, focus, spacing, fadeRadius};
 }
 
-glm::mat4 EditorView::renderCamera() const {
+EditorView::SceneView EditorView::sceneView() const {
+    // De OpenGL (y arriba, z de -1 a 1) a Vulkan (y abajo, z de 0 a 1).
     glm::mat4 clip{1.0f};
     clip[1][1] = -1;
     clip[2][2] = 0.5f;
     clip[3][2] = 0.5f;
-    return clip * projection() * view();
+    const auto snap = cameraSnap();
+    const glm::mat4 snapped = view() * glm::translate(glm::mat4{1.0f}, -snap.offset);
+    // La imagen tiene un margen: la proyección se amplía para que la zona central coincida con la vista.
+    const float width = static_cast<float>(sceneSize_.x + 2 * sceneMargin);
+    const float height = static_cast<float>(sceneSize_.y + 2 * sceneMargin);
+    const float tangent = std::tan(glm::radians(fieldOfView) * 0.5f) * height / static_cast<float>(sceneSize_.y);
+    const glm::mat4 projection = glm::perspectiveRH_NO(2.0f * std::atan(tangent), width / height, nearPlane, farPlane);
+    SceneView result;
+    result.viewProj = clip * projection * snapped;
+    result.extent = {sceneSize_.x + 2 * sceneMargin, sceneSize_.y + 2 * sceneMargin};
+    result.nearPlane = nearPlane;
+    result.farPlane = farPlane;
+    return result;
 }
 
 void EditorView::setViewFromMatrix(const glm::mat4& matrix) {
@@ -856,6 +1178,9 @@ std::optional<EditorView::Hit> EditorView::raycast(ImVec2 mouse, ImVec2 origin, 
     for (const auto& entity : scene_.entities()) {
         if (entity.terrain) {
             if (auto hit = raycastTerrain(entity, ray); hit && (!best || hit->distance < best->distance)) best = hit;
+        }
+        if (entity.heightmap) {
+            if (auto hit = raycastHeightmap(entity, ray); hit && (!best || hit->distance < best->distance)) best = hit;
         }
         if (!entity.shape) continue;
         const auto model = modelMatrix(entity.transform);
@@ -1350,7 +1675,7 @@ void EditorView::handleShortcuts() {
         if (ImGui::Shortcut(ImGuiKey_C, once)) tool_ = Tool::build;
         if (ImGui::Shortcut(ImGuiKey_T, once)) tool_ = Tool::terrain;
         if (tool_ == Tool::terrain && ImGui::Shortcut(ImGuiKey_LeftBracket, once)) terrainRadius_ = std::max(1, terrainRadius_ - 1);
-        if (tool_ == Tool::terrain && ImGui::Shortcut(ImGuiKey_RightBracket, once)) terrainRadius_ = std::min(12, terrainRadius_ + 1);
+        if (tool_ == Tool::terrain && ImGui::Shortcut(ImGuiKey_RightBracket, once)) terrainRadius_ = std::min(32, terrainRadius_ + 1);
         if (tool_ == Tool::build && ImGui::Shortcut(ImGuiKey_Space, once)) buildRotation_ = (buildRotation_ + 1) % 4;
         if (ImGui::Shortcut(ImGuiKey_F, once)) focusSelection();
     }
@@ -1394,7 +1719,8 @@ void EditorView::drawMenuBar() {
         if (ImGui::MenuItem("Caja")) createPrimitive(ge3d::Primitive::box);
         if (ImGui::MenuItem("Rampa")) createPrimitive(ge3d::Primitive::ramp);
         ImGui::Separator();
-        if (ImGui::MenuItem("Terreno procedural")) createTerrain();
+        if (ImGui::MenuItem("Terreno")) createHeightmap();
+        if (ImGui::MenuItem("Terreno de voxeles")) createTerrain();
         if (ImGui::MenuItem("Objeto vacio")) {
             auto entity = scene_.makeEntity("Objeto", ge3d::Transform{{std::round(pivot_.x), 0, std::round(pivot_.z)}, {}, {1, 1, 1}});
             const auto id = entity.id;
@@ -1442,7 +1768,7 @@ void EditorView::drawToolbar() {
             {Tool::build, Icon::build, "##construir", "Construir (C)\nClic: coloca una pieza en la celda\n"
                                                       "Arrastre: coloca un trazo\nShift+arrastre: rellena un rectangulo\n"
                                                       "Ctrl+arrastre: borra piezas\nEspacio: gira la pieza 90 grados"},
-            {Tool::terrain, Icon::terrain, "##terreno", "Terreno (T)\nPinceles de voxeles: elevar, excavar, pintar y aplanar\n"
+            {Tool::terrain, Icon::terrain, "##terreno", "Terreno (T)\nPinceles: elevar, bajar, pintar, aplanar y suavizar\n"
                                                         "Mantener pulsado para seguir aplicando\n[ y ]: tamano del pincel"},
         };
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {1.0f, 0.0f});
@@ -1621,7 +1947,8 @@ void EditorView::drawHierarchy() {
         if (ImGui::BeginPopup("crear_objeto")) {
             if (ImGui::MenuItem("Caja")) createPrimitive(ge3d::Primitive::box);
             if (ImGui::MenuItem("Rampa")) createPrimitive(ge3d::Primitive::ramp);
-            if (ImGui::MenuItem("Terreno")) createTerrain();
+            if (ImGui::MenuItem("Terreno")) createHeightmap();
+            if (ImGui::MenuItem("Terreno de voxeles")) createTerrain();
             ImGui::EndPopup();
         }
         ImGui::SameLine();
@@ -1725,7 +2052,7 @@ void EditorView::drawInspector() {
         }
 
         // Los componentes se quitan con clic derecho en su cabecera.
-        enum class Removal { none, shape, terrain };
+        enum class Removal { none, shape, terrain, heightmap };
         Removal removal = Removal::none;
         const auto removeMenu = [&](const char* id, Removal kind) {
             if (ImGui::BeginPopupContextItem(id)) {
@@ -1785,9 +2112,17 @@ void EditorView::drawInspector() {
             }
         }
 
-        // Componente Terreno: generador procedural y tamaño (los pinceles están en la herramienta T).
-        if (entity->terrain) {
+        // Componente Terreno (malla): capas, generador y tamaño (los pinceles están en la herramienta T).
+        if (entity->heightmap) {
             const bool open = componentHeader("Terreno", boldFont_);
+            removeMenu("malla_menu", Removal::heightmap);
+            if (open) drawHeightmapComponent(*entity, frameStart);
+            ImGui::Spacing();
+        }
+
+        // Componente Terreno de vóxeles: generador procedural y tamaño.
+        if (entity->terrain) {
+            const bool open = componentHeader("Terreno de voxeles", boldFont_);
             removeMenu("terreno_menu", Removal::terrain);
             if (open) drawTerrainComponent(*entity, frameStart);
             ImGui::Spacing();
@@ -1797,6 +2132,7 @@ void EditorView::drawInspector() {
             std::optional<ge3d::Entity> before = frameStart;
             if (removal == Removal::shape) entity->shape.reset();
             if (removal == Removal::terrain) entity->terrain.reset();
+            if (removal == Removal::heightmap) entity->heightmap.reset();
             commitModification(before, "Quitar componente");
         }
 
@@ -1816,7 +2152,11 @@ void EditorView::drawInspector() {
                 entity->shape = ge3d::makeShape(ge3d::Primitive::ramp, paintMaterial_);
                 added = true;
             }
-            if (ImGui::MenuItem("Terreno", nullptr, false, !entity->terrain)) {
+            if (ImGui::MenuItem("Terreno", nullptr, false, !entity->heightmap)) {
+                entity->heightmap = ge3d::makeHeightmap(newHeightmap_);
+                added = true;
+            }
+            if (ImGui::MenuItem("Terreno de voxeles", nullptr, false, !entity->terrain)) {
                 entity->terrain = ge3d::makeTerrain(newTerrain_);
                 added = true;
             }
@@ -1836,6 +2176,53 @@ void EditorView::drawInspector() {
 }
 
 // --- Vista de escena ---------------------------------------------------------------------------
+
+void EditorView::drawStylePopup() {
+    if (!ImGui::BeginPopup("estilo_pixel")) return;
+    ImGui::SeparatorText("Pixel art");
+    static constexpr int sizes[] = {1, 2, 3, 4, 5, 6, 8};
+    static constexpr const char* sizeNames[] = {"1 (sin pixelar)", "2", "3", "4", "5", "6", "8"};
+    int current = 2;
+    for (int i = 0; i < 7; ++i) {
+        if (sizes[i] == style_.pixelSize) current = i;
+    }
+    ImGui::SetNextItemWidth(150 * scale_);
+    if (ImGui::Combo("Tamano del pixel", &current, sizeNames, 7)) style_.pixelSize = sizes[current];
+    ImGui::SetItemTooltip("Pixeles de pantalla por pixel de la escena. La resolucion interna se adapta a la vista.");
+    ImGui::Checkbox("Camara estable", &style_.snapCamera);
+    ImGui::SetItemTooltip("La camara avanza de pixel en pixel y la imagen se desplaza suavemente:\n"
+                          "los bordes no parpadean al moverse");
+
+    ImGui::SeparatorText("Contornos");
+    ImGui::Checkbox("Contornos y aristas", &style_.outlines);
+    ImGui::BeginDisabled(!style_.outlines);
+    ImGui::SetNextItemWidth(150 * scale_);
+    ImGui::SliderFloat("Silueta", &style_.outlineDarken, 0.0f, 1.0f, "%.2f");
+    ImGui::SetItemTooltip("Oscurece el borde exterior de cada objeto");
+    ImGui::SetNextItemWidth(150 * scale_);
+    ImGui::SliderFloat("Aristas", &style_.edgeLighten, 0.0f, 1.0f, "%.2f");
+    ImGui::SetItemTooltip("Aclara las esquinas y crestas (cambios bruscos de orientacion)");
+    ImGui::SetNextItemWidth(150 * scale_);
+    ImGui::SliderFloat("Sensibilidad silueta", &style_.outlineThreshold, 0.02f, 0.5f, "%.2f", ImGuiSliderFlags_Logarithmic);
+    ImGui::SetNextItemWidth(150 * scale_);
+    ImGui::SliderFloat("Sensibilidad aristas", &style_.edgeThreshold, 0.05f, 1.5f, "%.2f", ImGuiSliderFlags_Logarithmic);
+    ImGui::EndDisabled();
+
+    ImGui::SeparatorText("Luz y color");
+    ImGui::SetNextItemWidth(150 * scale_);
+    ImGui::SliderInt("Bandas de luz", &style_.lightBands, 0, 6, style_.lightBands ? "%d" : "continua");
+    ImGui::SetItemTooltip("Escalones de luz del sol, como el sombreado del pixel art dibujado a mano");
+    ImGui::SetNextItemWidth(150 * scale_);
+    ImGui::SliderInt("Colores por canal", &style_.colorLevels, 0, 32, style_.colorLevels ? "%d" : "todos");
+    ImGui::SetItemTooltip("Reduce la paleta con tramado ordenado (aspecto de consola antigua)");
+    ImGui::BeginDisabled(style_.colorLevels == 0);
+    ImGui::SetNextItemWidth(150 * scale_);
+    ImGui::SliderFloat("Tramado", &style_.colorDither, 0.0f, 1.0f, "%.2f");
+    ImGui::EndDisabled();
+    ImGui::Spacing();
+    if (ImGui::Button("Valores por defecto")) style_ = RenderStyle{};
+    ImGui::EndPopup();
+}
 
 void EditorView::drawViewport(ImTextureID sceneTexture) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
@@ -1874,23 +2261,55 @@ void EditorView::drawViewport(ImTextureID sceneTexture) {
             if (tool_ == Tool::terrain) {
                 // Pinceles del terreno.
                 ImGui::SameLine(0, 16 * scale_);
-                static constexpr const char* brushes[] = {"Elevar", "Excavar", "Pintar", "Aplanar"};
-                for (int i = 0; i < 4; ++i) {
+                static constexpr const char* brushes[] = {"Elevar", "Bajar", "Pintar", "Aplanar", "Suavizar"};
+                static constexpr const char* brushTips[] = {
+                    "Sube el terreno (en voxeles, anade del material elegido)", "Baja el terreno (en voxeles, excava)",
+                    "Pinta la capa elegida (en voxeles, el material)", "Nivela a la altura donde empieza el trazo",
+                    "Suaviza el relieve (solo terreno de malla)"};
+                for (int i = 0; i < 5; ++i) {
                     if (i) ImGui::SameLine(0, 2);
-                    if (toggleButton(brushes[i], static_cast<int>(terrainBrush_) == i)) terrainBrush_ = static_cast<TerrainBrush>(i);
+                    if (toggleButton(brushes[i], static_cast<int>(terrainBrush_) == i, brushTips[i])) {
+                        terrainBrush_ = static_cast<TerrainBrush>(i);
+                    }
                 }
                 ImGui::SameLine();
-                ImGui::SetNextItemWidth(90 * scale_);
-                ImGui::SliderInt("##radio", &terrainRadius_, 1, 12, "radio %d");
-                ImGui::SetItemTooltip("Radio del pincel en voxeles ([ y ])");
+                ImGui::SetNextItemWidth(80 * scale_);
+                ImGui::SliderInt("##radio", &terrainRadius_, 1, 32, "radio %d");
+                ImGui::SetItemTooltip("Radio del pincel en celdas o voxeles ([ y ])");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(80 * scale_);
+                ImGui::SliderFloat("##fuerza", &brushStrength_, 0.05f, 1.0f, "fuerza %.2f");
+                ImGui::SetItemTooltip("Velocidad del pincel en el terreno de malla");
             }
-            if (tool_ == Tool::paint || tool_ == Tool::build || tool_ == Tool::terrain) {
+            const auto* selectedEntity = scene_.find(selected_);
+            const bool layerStrip = tool_ == Tool::terrain && selectedEntity && selectedEntity->heightmap;
+            if (layerStrip) {
+                // Terreno de malla: se pinta una de sus 4 capas.
+                ImGui::SameLine(0, 16 * scale_);
+                const auto& layers = selectedEntity->heightmap->settings.layers;
+                for (int layer = 0; layer < ge3d::Heightmap::layerCount; ++layer) {
+                    ImGui::PushID(layer);
+                    if (layer) ImGui::SameLine(0, 2);
+                    if (materialSwatch("##capa", layers[static_cast<std::size_t>(layer)], paintLayer_ == layer, ImGui::GetFrameHeight() - 2)) {
+                        paintLayer_ = layer;
+                        terrainBrush_ = TerrainBrush::paint;
+                    }
+                    ImGui::SetItemTooltip("Capa %d: %s", layer + 1, materialName(layers[static_cast<std::size_t>(layer)]));
+                    ImGui::PopID();
+                }
+            }
+            if (!layerStrip && (tool_ == Tool::paint || tool_ == Tool::build || tool_ == Tool::terrain)) {
                 // El material activo queda a mano en la barra de la vista.
                 ImGui::SameLine(0, 16 * scale_);
                 materialStrip();
             }
             // El texto informativo solo se muestra si cabe a la derecha sin tapar los controles.
-            const char* info = "320 x 180  |  Perspectiva";
+            ImGui::SameLine(0, 16 * scale_);
+            if (ImGui::Button("Estilo")) ImGui::OpenPopup("estilo_pixel");
+            ImGui::SetItemTooltip("Tamano del pixel, contornos, luz por bandas y colores");
+            drawStylePopup();
+            char info[64];
+            std::snprintf(info, sizeof info, "%u x %u  |  pixel %d", sceneSize_.x, sceneSize_.y, style_.pixelSize);
             ImGui::SameLine();
             const float infoWidth = ImGui::CalcTextSize(info).x;
             const float infoX = ImGui::GetWindowWidth() - infoWidth - 10 * scale_;
@@ -1910,18 +2329,27 @@ void EditorView::drawViewport(ImTextureID sceneTexture) {
         const auto position = ImGui::GetCursorScreenPos();
         const auto& io = ImGui::GetIO();
         if (available.x > 1 && available.y > 1) {
+            // Resolución interna: la vista dividida por el tamaño del píxel. Cada píxel de la escena ocupa
+            // exactamente pixelSize x pixelSize píxeles de pantalla (todos iguales, sin escalado irregular).
             const auto dpi = io.DisplayFramebufferScale;
-            const auto zoom = std::min(available.x * dpi.x / 320, available.y * dpi.y / 180);
-            const auto scale = zoom >= 1 ? std::floor(zoom) : zoom;
-            const ImVec2 size{320 * scale / dpi.x, 180 * scale / dpi.y};
+            const int pixel = std::max(1, style_.pixelSize);
+            const glm::uvec2 wanted{static_cast<unsigned>(std::max(16.0f, std::floor(available.x * dpi.x / static_cast<float>(pixel)))),
+                                    static_cast<unsigned>(std::max(16.0f, std::floor(available.y * dpi.y / static_cast<float>(pixel))))};
+            requestedExtent_ = wanted + glm::uvec2(2 * sceneMargin);
+            sceneSize_ = glm::min(wanted, capacity_ - glm::uvec2(2 * sceneMargin));
+            aspect_ = static_cast<float>(sceneSize_.x) / static_cast<float>(sceneSize_.y);
+            const ImVec2 size{static_cast<float>(sceneSize_.x * static_cast<unsigned>(pixel)) / dpi.x,
+                              static_cast<float>(sceneSize_.y * static_cast<unsigned>(pixel)) / dpi.y};
             const ImVec2 origin{
                 std::floor((position.x + (available.x - size.x) * 0.5f) * dpi.x) / dpi.x,
                 std::floor((position.y + (available.y - size.y) * 0.5f) * dpi.y) / dpi.y
             };
             auto* draw = ImGui::GetWindowDrawList();
             const ImVec2 end{origin.x + size.x, origin.y + size.y};
-            draw->AddRectFilled(position, {position.x + available.x, position.y + available.y}, IM_COL32(28, 28, 28, 255));
-            draw->AddImage(sceneTexture, origin, end);
+            // La imagen se añade al final (canal 0, debajo de todo) con la cámara ya actualizada por la
+            // entrada de este fotograma: así su desplazamiento de subpíxel coincide con lo que se dibuja.
+            draw->ChannelsSplit(2);
+            draw->ChannelsSetCurrent(1);
             if (isPlaying()) draw->AddRect(origin, end, ImGui::GetColorU32(accentHover), 0, 0, 2 * scale_);
 
             const bool hovered = ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(origin, end);
@@ -2021,6 +2449,15 @@ void EditorView::drawViewport(ImTextureID sceneTexture) {
             if (tool_ == Tool::build) handleBuildTool(draw, origin, size, canUseMouse);
             if (tool_ == Tool::terrain) handleTerrainTool(draw, origin, size, canUseMouse);
             draw->PopClipRect();
+
+            draw->ChannelsSetCurrent(0);
+            draw->AddRectFilled(position, {position.x + available.x, position.y + available.y}, IM_COL32(28, 28, 28, 255));
+            const auto snap = cameraSnap();
+            const glm::vec2 capacity{std::max(1u, capacity_.x), std::max(1u, capacity_.y)};
+            const glm::vec2 uv0 = (glm::vec2(static_cast<float>(sceneMargin)) + snap.subpixel) / capacity;
+            const glm::vec2 uv1 = uv0 + glm::vec2(sceneSize_) / capacity;
+            draw->AddImage(sceneTexture, origin, end, {uv0.x, uv0.y}, {uv1.x, uv1.y});
+            draw->ChannelsMerge();
 
             const bool selectTool = tool_ == Tool::move || tool_ == Tool::rotate || tool_ == Tool::scale;
             if (canUseMouse && selectTool && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {

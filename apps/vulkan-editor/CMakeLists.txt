@@ -30,26 +30,31 @@ endif()
 find_program(GE3D_SLANGC NAMES slangc HINTS "$ENV{VULKAN_SDK}/Bin" REQUIRED)
 set(GE3D_SHADER_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/shaders")
 file(MAKE_DIRECTORY "${GE3D_SHADER_OUTPUT_DIR}")
-# Puntos de entrada de shaders/scene.slang: archivo de salida, función y etapa.
+# Puntos de entrada de los shaders: archivo .slang, nombre de salida, función y etapa.
+# Cada uno se compila a <archivo>.<nombre>.spv.
 set(GE3D_SHADER_ENTRIES
-    "vertex|vertexMain|vertex"
-    "voxel|voxelVertexMain|vertex"
-    "fragment|fragmentMain|fragment"
+    "scene|vertex|vertexMain|vertex"
+    "scene|voxel|voxelVertexMain|vertex"
+    "scene|height|heightVertexMain|vertex"
+    "scene|fragment|fragmentMain|fragment"
+    "post|vertex|postVertexMain|vertex"
+    "post|fragment|postFragmentMain|fragment"
 )
 foreach(entry IN LISTS GE3D_SHADER_ENTRIES)
     string(REPLACE "|" ";" parts "${entry}")
-    list(GET parts 0 name)
-    list(GET parts 1 function)
-    list(GET parts 2 stage)
+    list(GET parts 0 file)
+    list(GET parts 1 name)
+    list(GET parts 2 function)
+    list(GET parts 3 stage)
     add_custom_command(
-        OUTPUT "${GE3D_SHADER_OUTPUT_DIR}/scene.${name}.spv"
-        COMMAND "${GE3D_SLANGC}" "${CMAKE_CURRENT_SOURCE_DIR}/shaders/scene.slang"
+        OUTPUT "${GE3D_SHADER_OUTPUT_DIR}/${file}.${name}.spv"
+        COMMAND "${GE3D_SLANGC}" "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${file}.slang"
             -entry ${function} -stage ${stage} -target spirv -matrix-layout-column-major
-            -o "${GE3D_SHADER_OUTPUT_DIR}/scene.${name}.spv"
-        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/scene.slang"
+            -o "${GE3D_SHADER_OUTPUT_DIR}/${file}.${name}.spv"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${file}.slang"
         VERBATIM
     )
-    list(APPEND GE3D_SHADER_BINARIES "${GE3D_SHADER_OUTPUT_DIR}/scene.${name}.spv")
+    list(APPEND GE3D_SHADER_BINARIES "${GE3D_SHADER_OUTPUT_DIR}/${file}.${name}.spv")
 endforeach()
 add_custom_target(ge3d_vulkan_shaders DEPENDS ${GE3D_SHADER_BINARIES})
 add_dependencies(ge3d_vulkan_editor ge3d_vulkan_shaders)

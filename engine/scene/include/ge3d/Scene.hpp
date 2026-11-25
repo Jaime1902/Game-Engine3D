@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ge3d/Heightmap.hpp"
 #include "ge3d/Uuid.hpp"
 #include "ge3d/Voxel.hpp"
 #include <array>
@@ -63,6 +64,16 @@ struct TerrainComponent {
 
 [[nodiscard]] TerrainComponent makeTerrain(const TerrainSettings& settings = {});
 
+// Terreno de malla (rejilla de alturas con capas de material). Igual que los vóxeles, los datos se
+// comparten entre copias de la entidad y sus ediciones se deshacen por chunk (HeightmapChange).
+struct HeightmapComponent {
+    HeightmapSettings settings{};
+    std::shared_ptr<Heightmap> data;
+    friend bool operator==(const HeightmapComponent&, const HeightmapComponent&) = default;
+};
+
+[[nodiscard]] HeightmapComponent makeHeightmap(const HeightmapSettings& settings = {});
+
 struct Entity {
     EntityId id{};
     Uuid uuid{};
@@ -70,6 +81,7 @@ struct Entity {
     Transform transform{};
     std::optional<ShapeComponent> shape;
     std::optional<TerrainComponent> terrain;
+    std::optional<HeightmapComponent> heightmap;
     friend bool operator==(const Entity&, const Entity&) = default;
 };
 

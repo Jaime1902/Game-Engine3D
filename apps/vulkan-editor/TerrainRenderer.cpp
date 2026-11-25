@@ -102,12 +102,28 @@ void TerrainRenderer::init(const GpuContext& context) {
         vkCmdCopyBuffer(command, upload.handle, quadIndices_.handle, 1, &copy);
     });
     destroyGpuBuffer(context.allocator, upload);
+
+    // Índices de un chunk de terreno de malla (iguales para todos los chunks).
+    const auto heightIndices = ge3d::heightmapChunkIndices();
+    heightIndexCount_ = static_cast<std::uint32_t>(heightIndices.size());
+    const VkDeviceSize heightBytes = heightIndices.size() * sizeof(std::uint32_t);
+    heightIndices_ = createGpuBuffer(context.allocator, heightBytes, VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, false);
+    auto heightUpload = createGpuBuffer(context.allocator, heightBytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true);
+    std::memcpy(heightUpload.mapped, heightIndices.data(), heightBytes);
+    vmaFlushAllocation(context.allocator, heightUpload.allocation, 0, VK_WHOLE_SIZE);
+    submitOnce(context, [&](VkCommandBuffer command) {
+        const VkBufferCopy copy{0, 0, heightBytes};
+        vkCmdCopyBuffer(command, heightUpload.handle, heightIndices_.handle, 1, &copy);
+    });
+    destroyGpuBuffer(context.allocator, heightUpload);
 }
 
 void TerrainRenderer::destroy() {
     terrains_.clear();
+    heightmaps_.clear();
     pool_.destroy();
     destroyGpuBuffer(context_.allocator, quadIndices_);
+    destroyGpuBuffer(context_.allocator, heightIndices_);
     destroyGpuBuffer(context_.allocator, staging_);
 }
 
@@ -118,10 +134,18 @@ void TerrainRenderer::releaseTerrain(TerrainGpu& terrain, std::uint64_t frame) {
     }
 }
 
+void TerrainRenderer::releaseHeightmap(HeightmapGpu& terrain, std::uint64_t frame) {
+    for (auto& chunk : terrain.chunks) {
+        pool_.release(chunk.allocation, frame);
+        chunk = {};
+    }
+}
+
 void TerrainRenderer::update(VkCommandBuffer command, int frameSlot, std::uint64_t frameNumber, std::uint64_t completedFrame,
                              const ge3d::Scene& scene, const MaterialLookup& lookup, std::uint64_t materialsVersion) {
     pool_.collect(completedFrame);
     for (auto& [id, terrain] : terrains_) terrain.seen = false;
+    for (auto& [id, terrain] : heightmaps_) terrain.seen = false;
 
     // Presupuesto por fotograma: tiempo de mallado y espacio de staging.
     const auto start = std::chrono::steady_clock::now();
@@ -197,6 +221,63 @@ void TerrainRenderer::update(VkCommandBuffer command, int frameSlot, std::uint64
             }
             chunk.revision = grid.chunkRevision(index);
             stats_.quads += chunk.quads;
+        }
+    }
+
+    // Terrenos de malla: 65 x 65 vértices por chunk, remallados solo si cambió su revisión.
+    for (const auto& entity : scene.entities()) {
+        if (!entity.heightmap || !entity.heightmap->data) continue;
+        const auto& map = *entity.heightmap->data;
+        const float cellSize = entity.heightmap->settings.cellSize;
+        auto& terrain = heightmaps_[entity.id];
+        terrain.seen = true;
+        ++stats_.terrains;
+        if (terrain.map != &map || terrain.chunks.size() != static_cast<std::size_t>(map.chunkCount())) {
+            releaseHeightmap(terrain, frameNumber);
+            terrain.map = &map;
+            terrain.chunks.assign(static_cast<std::size_t>(map.chunkCount()), {});
+        }
+        // Las normales dependen del tamaño de la celda: si cambia, se remalla todo.
+        if (terrain.cellSize != cellSize) {
+            for (auto& chunk : terrain.chunks) chunk.revision = ~0ull;
+            terrain.cellSize = cellSize;
+        }
+        constexpr std::size_t cellsPerChunk = ge3d::Heightmap::chunkCells * ge3d::Heightmap::chunkCells;
+        constexpr VkDeviceSize bytes = static_cast<VkDeviceSize>(ge3d::Heightmap::chunkVertices * ge3d::Heightmap::chunkVertices) *
+                                       sizeof(ge3d::HeightVertex);
+        for (int index = 0; index < map.chunkCount(); ++index) {
+            auto& chunk = terrain.chunks[static_cast<std::size_t>(index)];
+            ++stats_.chunks;
+            stats_.quads += cellsPerChunk;
+            if (chunk.revision == map.chunkRevision(index)) continue;
+            if (outOfBudget || std::chrono::steady_clock::now() - start > timeBudget || stagingUsed + bytes > stagingPerFrame) {
+                outOfBudget = true;
+                ++stats_.pendingChunks;
+                continue;
+            }
+            const auto vertices = ge3d::meshHeightChunk(map, index, cellSize);
+            const auto range = map.chunkHeightRange(index);
+            // La GPU puede estar leyendo la memoria anterior: se libera de forma diferida y se pide otra.
+            pool_.release(chunk.allocation, frameNumber);
+            chunk.allocation = pool_.allocate(bytes);
+            if (!chunk.allocation.valid()) {
+                editorLog().add(LogLevel::error, "Terreno: un chunk no cabe en una pagina de geometria");
+                continue;
+            }
+            std::memcpy(static_cast<std::uint8_t*>(staging_.mapped) + stagingBase + stagingUsed, vertices.data(), bytes);
+            copies.push_back({pool_.buffer(chunk.allocation.page), {stagingBase + stagingUsed, chunk.allocation.offset, bytes}});
+            stagingUsed += (bytes + 15) & ~VkDeviceSize{15};
+            chunk.revision = map.chunkRevision(index);
+            chunk.low = range[0];
+            chunk.high = range[1];
+        }
+    }
+    for (auto it = heightmaps_.begin(); it != heightmaps_.end();) {
+        if (!it->second.seen) {
+            releaseHeightmap(it->second, frameNumber);
+            it = heightmaps_.erase(it);
+        } else {
+            ++it;
         }
     }
 
@@ -279,6 +360,52 @@ void TerrainRenderer::draw(VkCommandBuffer command, VkPipelineLayout layout, con
                              static_cast<std::int32_t>(chunk.allocation.offset / sizeof(ge3d::VoxelVertex)), 0);
             ++stats_.visibleChunks;
             stats_.visibleQuads += chunk.quads;
+        }
+    }
+}
+
+void TerrainRenderer::drawHeightmaps(VkCommandBuffer command, VkPipelineLayout layout, const glm::mat4& viewProj,
+                                     const ge3d::Scene& scene, const std::function<glm::mat4(const ge3d::Transform&)>& modelMatrix,
+                                     const MaterialLookup& lookup) {
+    vkCmdBindIndexBuffer(command, heightIndices_.handle, 0, VK_INDEX_TYPE_UINT32);
+    int boundPage = -1;
+    constexpr float chunkCells = static_cast<float>(ge3d::Heightmap::chunkCells);
+    for (const auto& entity : scene.entities()) {
+        if (!entity.heightmap || !entity.heightmap->data) continue;
+        const auto found = heightmaps_.find(entity.id);
+        if (found == heightmaps_.end() || found->second.map != entity.heightmap->data.get()) continue;
+        const auto& terrain = found->second;
+        const auto& settings = entity.heightmap->settings;
+        const glm::mat4 model = modelMatrix(entity.transform);
+        const glm::mat4 clipFromModel = viewProj * model;
+        std::uint32_t layers[ge3d::Heightmap::layerCount];
+        for (std::size_t i = 0; i < settings.layers.size(); ++i) layers[i] = lookup(settings.layers[i]) & 0xFFFFu;
+        for (int index = 0; index < static_cast<int>(terrain.chunks.size()); ++index) {
+            const auto& chunk = terrain.chunks[static_cast<std::size_t>(index)];
+            if (!chunk.allocation.valid()) continue;
+            const auto coords = terrain.map->chunkCoords(index);
+            const glm::vec3 low{static_cast<float>(coords[0]) * chunkCells * settings.cellSize, chunk.low,
+                                static_cast<float>(coords[1]) * chunkCells * settings.cellSize};
+            const glm::vec3 high = low + glm::vec3{chunkCells * settings.cellSize, chunk.high - chunk.low, chunkCells * settings.cellSize};
+            if (outsideFrustum(clipFromModel, low, high)) continue;
+            if (chunk.allocation.page != boundPage) {
+                const VkBuffer buffer = pool_.buffer(chunk.allocation.page);
+                const VkDeviceSize offset = 0;
+                vkCmdBindVertexBuffers(command, 0, 1, &buffer, &offset);
+                boundPage = chunk.allocation.page;
+            }
+            ScenePush push;
+            push.model = model;
+            push.grid.w = modeHeightmap;
+            push.data = {static_cast<std::uint32_t>(coords[0] * ge3d::Heightmap::chunkCells),
+                         static_cast<std::uint32_t>(coords[1] * ge3d::Heightmap::chunkCells), layers[0] | (layers[1] << 16),
+                         layers[2] | (layers[3] << 16)};
+            push.extra.y = settings.cellSize;
+            vkCmdPushConstants(command, layout, pushStages, 0, sizeof(push), &push);
+            vkCmdDrawIndexed(command, heightIndexCount_, 1, 0,
+                             static_cast<std::int32_t>(chunk.allocation.offset / sizeof(ge3d::HeightVertex)), 0);
+            ++stats_.visibleChunks;
+            stats_.visibleQuads += static_cast<std::size_t>(ge3d::Heightmap::chunkCells * ge3d::Heightmap::chunkCells);
         }
     }
 }

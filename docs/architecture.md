@@ -16,11 +16,11 @@ Se propone GLFW, Dear ImGui Docking, ImGuizmo, EnTT, VMA, Jolt y miniaudio. Intr
 
 ### Modelo de componentes actual
 
-`ge3d::Entity` (engine/scene) es un nombre, un UUID y una `Transform` con componentes opcionales: `ShapeComponent` (caja o rampa con un material por cara) y `TerrainComponent` (configuración del generador y rejilla de vóxeles). Cada componente se serializa por separado en la escena v3 y se edita y deshace por separado en el Inspector. La etapa 3 añadirá `ScriptComponent` siguiendo el mismo patrón.
+`ge3d::Entity` (engine/scene) es un nombre, un UUID y una `Transform` con componentes opcionales: `ShapeComponent` (caja o rampa con un material por cara), `HeightmapComponent` (terreno de malla: rejilla de alturas con 4 capas de material) y `TerrainComponent` (configuración del generador y rejilla de vóxeles). Cada componente se serializa por separado en la escena v3 y se edita y deshace por separado en el Inspector. La etapa 3 añadirá `ScriptComponent` siguiendo el mismo patrón.
 
 Por ahora los componentes viven en la propia entidad (`std::optional`) y no en un registro EnTT: el historial de deshacer y el modo Play copian entidades completas, y con pocos miles de objetos recorrer un vector es suficiente. EnTT se incorporará cuando haya sistemas que iteren por tipo de componente cada fotograma (física y scripts, etapas 3 y 4) o cuando las mediciones de la etapa 6 lo pidan; el formato de escena no cambia con ese paso.
 
-Los vóxeles de un terreno se comparten entre copias de la entidad (`std::shared_ptr`), de modo que deshacer o duplicar una transformación no copia megabytes. Las ediciones de vóxeles se deshacen por chunk (`TerrainChange`), regenerar sustituye la rejilla entera, y Play trabaja sobre `Scene::deepCopy()` para que el juego nunca toque los vóxeles de edición.
+Los datos de un terreno se comparten entre copias de la entidad (`std::shared_ptr`), de modo que deshacer o duplicar una transformación no copia megabytes. Las ediciones se deshacen por chunk (`TerrainChange` para vóxeles, `HeightmapChange` para la malla, cuyos chunks comparten la fila de vértices del borde), regenerar sustituye la rejilla entera, y Play trabaja sobre `Scene::deepCopy()` para que el juego nunca toque los vóxeles de edición.
 
 ## Actualización y propiedad
 

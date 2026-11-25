@@ -86,8 +86,11 @@ VkDebugUtilsMessengerCreateInfoEXT messengerCreateInfo() {
 }
 
 
-constexpr VkExtent2D sceneExtent{320, 180};
+// La escena se dibuja a una resolución interna (la vista dividida por el tamaño del píxel) en imágenes
+// con capacidad de sobra, para no recrearlas cada vez que cambia el tamaño del panel.
+constexpr VkExtent2D initialSceneCapacity{1280, 768};
 constexpr VkFormat sceneFormat = VK_FORMAT_R8G8B8A8_UNORM;
+constexpr VkFormat normalFormat = VK_FORMAT_R8G8B8A8_UNORM;
 constexpr VkFormat depthFormat = VK_FORMAT_D32_SFLOAT;
 
 struct RenderImage {
@@ -96,12 +99,12 @@ struct RenderImage {
     VmaAllocation allocation{};
 };
 
-void createRenderImage(VkDevice device, VmaAllocator allocator, VkFormat format,
+void createRenderImage(VkDevice device, VmaAllocator allocator, VkFormat format, VkExtent2D extent,
                        VkImageUsageFlags usage, VkImageAspectFlags aspect, RenderImage& target) {
     VkImageCreateInfo image{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     image.imageType = VK_IMAGE_TYPE_2D;
     image.format = format;
-    image.extent = {sceneExtent.width, sceneExtent.height, 1};
+    image.extent = {extent.width, extent.height, 1};
     image.mipLevels = 1;
     image.arrayLayers = 1;
     image.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -270,13 +273,19 @@ void createBuffer(VmaAllocator allocator, VkDeviceSize size, VkBufferUsageFlags 
         "Allocate geometry buffer");
 }
 
-// Pipelines de la escena: piezas (triángulos), cuadrícula (líneas) y vóxeles (vértice compacto).
-VkPipeline createScenePipeline(VkDevice device, VkFormat colorFormat, VkPipelineLayout layout,
-                               VkPrimitiveTopology topology, bool voxels) {
-    VkShaderModule vertex = createShaderModule(device, voxels ? "scene.voxel.spv" : "scene.vertex.spv");
+// Pipelines de la escena: piezas (triángulos), cuadrícula (líneas), vóxeles (vértice compacto),
+// terreno de malla y la pasada de estilo pixel art (triángulo a pantalla completa, sin vértices).
+enum class PipelineKind { piece, grid, voxel, height, post };
+
+VkPipeline createScenePipeline(VkDevice device, VkPipelineLayout layout, PipelineKind kind) {
+    const bool post = kind == PipelineKind::post;
+    const char* vertexName = kind == PipelineKind::voxel ? "scene.voxel.spv"
+                           : kind == PipelineKind::height ? "scene.height.spv"
+                           : post ? "post.vertex.spv" : "scene.vertex.spv";
+    VkShaderModule vertex = createShaderModule(device, vertexName);
     VkShaderModule fragment = VK_NULL_HANDLE;
     try {
-        fragment = createShaderModule(device, "scene.fragment.spv");
+        fragment = createShaderModule(device, post ? "post.fragment.spv" : "scene.fragment.spv");
         VkPipelineShaderStageCreateInfo stages[2]{};
         stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
         stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
@@ -288,21 +297,31 @@ VkPipeline createScenePipeline(VkDevice device, VkFormat colorFormat, VkPipeline
         stages[1].pName = "main";
 
         VkPipelineVertexInputStateCreateInfo vertexInput{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-        const VkVertexInputBindingDescription binding{0, voxels ? static_cast<std::uint32_t>(sizeof(ge3d::VoxelVertex))
-                                                                : static_cast<std::uint32_t>(sizeof(Vertex)),
-                                                      VK_VERTEX_INPUT_RATE_VERTEX};
+        const std::uint32_t stride = kind == PipelineKind::voxel ? static_cast<std::uint32_t>(sizeof(ge3d::VoxelVertex))
+                                   : kind == PipelineKind::height ? static_cast<std::uint32_t>(sizeof(ge3d::HeightVertex))
+                                   : static_cast<std::uint32_t>(sizeof(Vertex));
+        const VkVertexInputBindingDescription binding{0, stride, VK_VERTEX_INPUT_RATE_VERTEX};
         const VkVertexInputAttributeDescription attributes[] = {
             {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, position)},
             {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, color)},
             {2, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, normal)}
         };
         const VkVertexInputAttributeDescription voxelAttribute{0, 0, VK_FORMAT_R32G32_UINT, 0};
-        vertexInput.vertexBindingDescriptionCount = 1;
-        vertexInput.pVertexBindingDescriptions = &binding;
-        vertexInput.vertexAttributeDescriptionCount = voxels ? 1 : 3;
-        vertexInput.pVertexAttributeDescriptions = voxels ? &voxelAttribute : attributes;
+        const VkVertexInputAttributeDescription heightAttributes[] = {
+            {0, 0, VK_FORMAT_R32_SFLOAT, offsetof(ge3d::HeightVertex, height)},
+            {1, 0, VK_FORMAT_R32_UINT, offsetof(ge3d::HeightVertex, normal)},
+            {2, 0, VK_FORMAT_R8G8B8A8_UNORM, offsetof(ge3d::HeightVertex, weights)},
+            {3, 0, VK_FORMAT_R32_UINT, offsetof(ge3d::HeightVertex, cell)}
+        };
+        if (!post) {
+            vertexInput.vertexBindingDescriptionCount = 1;
+            vertexInput.pVertexBindingDescriptions = &binding;
+            vertexInput.vertexAttributeDescriptionCount = kind == PipelineKind::voxel ? 1 : kind == PipelineKind::height ? 4 : 3;
+            vertexInput.pVertexAttributeDescriptions = kind == PipelineKind::voxel ? &voxelAttribute
+                                                     : kind == PipelineKind::height ? heightAttributes : attributes;
+        }
         VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
-        assembly.topology = topology;
+        assembly.topology = kind == PipelineKind::grid ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
         VkPipelineViewportStateCreateInfo viewport{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
         viewport.viewportCount = 1;
         viewport.scissorCount = 1;
@@ -317,21 +336,24 @@ VkPipeline createScenePipeline(VkDevice device, VkFormat colorFormat, VkPipeline
         raster.lineWidth = 1.0f;
         VkPipelineMultisampleStateCreateInfo multisample{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
         multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-        VkPipelineColorBlendAttachmentState blendAttachment{};
-        blendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-            VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        // Escena: color + normal (para los contornos). Post: solo color.
+        VkPipelineColorBlendAttachmentState blendAttachments[2]{};
+        for (auto& attachment : blendAttachments) {
+            attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        }
         VkPipelineColorBlendStateCreateInfo blend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-        blend.attachmentCount = 1;
-        blend.pAttachments = &blendAttachment;
+        blend.attachmentCount = post ? 1 : 2;
+        blend.pAttachments = blendAttachments;
         VkPipelineDepthStencilStateCreateInfo depth{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
-        depth.depthTestEnable = VK_TRUE;
-        depth.depthWriteEnable = VK_TRUE;
+        depth.depthTestEnable = post ? VK_FALSE : VK_TRUE;
+        depth.depthWriteEnable = post ? VK_FALSE : VK_TRUE;
         depth.depthCompareOp = VK_COMPARE_OP_LESS;
-        VkFormat colorFormats[] = {colorFormat};
+        VkFormat colorFormats[] = {sceneFormat, normalFormat};
         VkPipelineRenderingCreateInfo rendering{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
-        rendering.colorAttachmentCount = 1;
+        rendering.colorAttachmentCount = post ? 1 : 2;
         rendering.pColorAttachmentFormats = colorFormats;
-        rendering.depthAttachmentFormat = depthFormat;
+        rendering.depthAttachmentFormat = post ? VK_FORMAT_UNDEFINED : depthFormat;
         VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
         info.pNext = &rendering;
         info.stageCount = 2;
@@ -423,6 +445,12 @@ void run() {
     VkPipeline cubePipeline = VK_NULL_HANDLE;
     VkPipeline gridPipeline = VK_NULL_HANDLE;
     VkPipeline voxelPipeline = VK_NULL_HANDLE;
+    VkPipeline heightPipeline = VK_NULL_HANDLE;
+    VkPipeline postPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout postLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout postSetLayout = VK_NULL_HANDLE;
+    VkDescriptorPool postPool = VK_NULL_HANDLE;
+    VkDescriptorSet postSets[2]{};
     VkDescriptorSetLayout sceneSetLayout = VK_NULL_HANDLE;
     VkDescriptorPool scenePool = VK_NULL_HANDLE;
     VkDescriptorSet sceneSets[2]{};
@@ -442,7 +470,19 @@ void run() {
     VkFence frameFence[2]{};
     VmaAllocator allocator{};
     RenderImage sceneColors[2]{};
+    RenderImage sceneNormals[2]{};
     RenderImage sceneDepths[2]{};
+    RenderImage finalColors[2]{};
+    VkExtent2D sceneCapacity{};
+    const auto destroySceneTargets = [&] {
+        for (int i = 0; i < 2; ++i) {
+            for (auto* target : {&sceneColors[i], &sceneNormals[i], &sceneDepths[i], &finalColors[i]}) {
+                if (target->view) vkDestroyImageView(device, target->view, nullptr);
+                if (target->image) vmaDestroyImage(allocator, target->image, target->allocation);
+                *target = {};
+            }
+        }
+    };
     const auto destroySwapchain = [&] {
         for (auto semaphore : renderDone) {
             if (semaphore) vkDestroySemaphore(device, semaphore, nullptr);
@@ -466,6 +506,11 @@ void run() {
             if (scenePool) vkDestroyDescriptorPool(device, scenePool, nullptr);
             if (sceneSetLayout) vkDestroyDescriptorSetLayout(device, sceneSetLayout, nullptr);
             if (voxelPipeline) vkDestroyPipeline(device, voxelPipeline, nullptr);
+            if (heightPipeline) vkDestroyPipeline(device, heightPipeline, nullptr);
+            if (postPipeline) vkDestroyPipeline(device, postPipeline, nullptr);
+            if (postLayout) vkDestroyPipelineLayout(device, postLayout, nullptr);
+            if (postPool) vkDestroyDescriptorPool(device, postPool, nullptr);
+            if (postSetLayout) vkDestroyDescriptorSetLayout(device, postSetLayout, nullptr);
             if (sceneSampler) vkDestroySampler(device, sceneSampler, nullptr);
             for (const auto& buffer : {vertices, indices, staging}) {
                 if (buffer.handle) vmaDestroyBuffer(allocator, buffer.handle, buffer.allocation);
@@ -475,11 +520,8 @@ void run() {
             destroySwapchain();
             if (cubePipeline) vkDestroyPipeline(device, cubePipeline, nullptr);
             if (pipelineLayout) vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+            destroySceneTargets();
             for (int i = 0; i < 2; ++i) {
-                for (const auto* target : {&sceneColors[i], &sceneDepths[i]}) {
-                    if (target->view) vkDestroyImageView(device, target->view, nullptr);
-                    if (target->image) vmaDestroyImage(allocator, target->image, target->allocation);
-                }
                 if (imageReady[i]) vkDestroySemaphore(device, imageReady[i], nullptr);
                 if (frameFence[i]) vkDestroyFence(device, frameFence[i], nullptr);
             }
@@ -555,16 +597,18 @@ void run() {
             vkGetPhysicalDeviceProperties(candidate, &properties);
             if (properties.apiVersion < VK_API_VERSION_1_3) continue;
             VkPhysicalDeviceVulkan13Features features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+            VkPhysicalDeviceVulkan11Features features11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
+            features.pNext = &features11;
             VkPhysicalDeviceFeatures2 features2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
             features2.pNext = &features;
             vkGetPhysicalDeviceFeatures2(candidate, &features2);
             const auto candidateQueues = findQueues(candidate, surface);
             const auto support = querySwapchain(candidate, surface);
-            if (features.dynamicRendering && features.synchronization2 && candidateQueues.complete() &&
+            if (features.dynamicRendering && features.synchronization2 && features11.shaderDrawParameters && candidateQueues.complete() &&
                 !support.formats.empty() && !support.modes.empty() &&
                 (support.capabilities.supportedUsageFlags & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) &&
                 supportsFormat(candidate, sceneFormat, VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) &&
-                supportsFormat(candidate, depthFormat, VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)) {
+                supportsFormat(candidate, depthFormat, VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) {
                 physical = candidate;
                 queues = candidateQueues;
                 break;
@@ -584,6 +628,10 @@ void run() {
         VkPhysicalDeviceVulkan13Features enabled13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
         enabled13.dynamicRendering = VK_TRUE;
         enabled13.synchronization2 = VK_TRUE;
+        // SV_VertexID del triángulo a pantalla completa de la pasada de post.
+        VkPhysicalDeviceVulkan11Features enabled11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
+        enabled11.shaderDrawParameters = VK_TRUE;
+        enabled13.pNext = &enabled11;
         VkDeviceCreateInfo deviceInfo{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
         deviceInfo.pNext = &enabled13;
         deviceInfo.queueCreateInfoCount = static_cast<std::uint32_t>(queueInfos.size());
@@ -602,13 +650,6 @@ void run() {
         allocatorInfo.device = device;
         allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_3;
         check(vmaCreateAllocator(&allocatorInfo, &allocator), "Create Vulkan memory allocator");
-        for (int i = 0; i < 2; ++i) {
-            createRenderImage(device, allocator, sceneFormat,
-                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-                VK_IMAGE_ASPECT_COLOR_BIT, sceneColors[i]);
-            createRenderImage(device, allocator, depthFormat, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-                VK_IMAGE_ASPECT_DEPTH_BIT, sceneDepths[i]);
-        }
         // Descriptores de la escena: datos del fotograma (cámara y materiales) y el array de texturas.
         const VkDescriptorSetLayoutBinding sceneBindings[] = {
             {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
@@ -625,9 +666,40 @@ void run() {
         layoutInfo.pushConstantRangeCount = 1;
         layoutInfo.pPushConstantRanges = &pushRange;
         check(vkCreatePipelineLayout(device, &layoutInfo, nullptr, &pipelineLayout), "Create pipeline layout");
-        cubePipeline = createScenePipeline(device, sceneFormat, pipelineLayout, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, false);
-        gridPipeline = createScenePipeline(device, sceneFormat, pipelineLayout, VK_PRIMITIVE_TOPOLOGY_LINE_LIST, false);
-        voxelPipeline = createScenePipeline(device, sceneFormat, pipelineLayout, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, true);
+        cubePipeline = createScenePipeline(device, pipelineLayout, PipelineKind::piece);
+        gridPipeline = createScenePipeline(device, pipelineLayout, PipelineKind::grid);
+        voxelPipeline = createScenePipeline(device, pipelineLayout, PipelineKind::voxel);
+        heightPipeline = createScenePipeline(device, pipelineLayout, PipelineKind::height);
+
+        // Pasada de estilo: lee color, normal y profundidad de la escena.
+        VkDescriptorSetLayoutBinding postBindings[3]{};
+        for (std::uint32_t i = 0; i < 3; ++i) {
+            postBindings[i] = {i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+        }
+        VkDescriptorSetLayoutCreateInfo postSetInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        postSetInfo.bindingCount = 3;
+        postSetInfo.pBindings = postBindings;
+        check(vkCreateDescriptorSetLayout(device, &postSetInfo, nullptr, &postSetLayout), "Create post set layout");
+        const VkPushConstantRange postRange{VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PostPush)};
+        VkPipelineLayoutCreateInfo postLayoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        postLayoutInfo.setLayoutCount = 1;
+        postLayoutInfo.pSetLayouts = &postSetLayout;
+        postLayoutInfo.pushConstantRangeCount = 1;
+        postLayoutInfo.pPushConstantRanges = &postRange;
+        check(vkCreatePipelineLayout(device, &postLayoutInfo, nullptr, &postLayout), "Create post pipeline layout");
+        postPipeline = createScenePipeline(device, postLayout, PipelineKind::post);
+        const VkDescriptorPoolSize postPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 6};
+        VkDescriptorPoolCreateInfo postPoolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        postPoolInfo.maxSets = 2;
+        postPoolInfo.poolSizeCount = 1;
+        postPoolInfo.pPoolSizes = &postPoolSize;
+        check(vkCreateDescriptorPool(device, &postPoolInfo, nullptr, &postPool), "Create post descriptor pool");
+        const VkDescriptorSetLayout postLayouts[] = {postSetLayout, postSetLayout};
+        VkDescriptorSetAllocateInfo postAllocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        postAllocate.descriptorPool = postPool;
+        postAllocate.descriptorSetCount = 2;
+        postAllocate.pSetLayouts = postLayouts;
+        check(vkAllocateDescriptorSets(device, &postAllocate, postSets), "Allocate post descriptor sets");
 
         const VkDescriptorPoolSize poolSizes[] = {
             {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2},
@@ -669,6 +741,48 @@ void run() {
         sampler.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
         sampler.addressModeU = sampler.addressModeV = sampler.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
         check(vkCreateSampler(device, &sampler, nullptr, &sceneSampler), "Create pixel art sampler");
+
+        // Imágenes de la escena con la capacidad indicada (redondeada hacia arriba para crecer pocas veces).
+        // Se llama con la GPU parada. Vuelve a escribir los descriptores del post y las texturas de la vista.
+        const auto createSceneTargets = [&](VkExtent2D requested) {
+            if (sceneCapacity.width) check(vkDeviceWaitIdle(device), "Wait before resizing scene images");
+            if (uiRenderer && sceneCapacity.width) {
+                for (auto& texture : sceneTextures) ImGui_ImplVulkan_RemoveTexture(texture);
+            }
+            destroySceneTargets();
+            const auto round = [](std::uint32_t value) { return (value + 255u) & ~255u; };
+            sceneCapacity = {round(std::max(requested.width, sceneCapacity.width)),
+                             round(std::max(requested.height, sceneCapacity.height))};
+            for (int i = 0; i < 2; ++i) {
+                createRenderImage(device, allocator, sceneFormat, sceneCapacity,
+                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_COLOR_BIT, sceneColors[i]);
+                createRenderImage(device, allocator, normalFormat, sceneCapacity,
+                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_COLOR_BIT, sceneNormals[i]);
+                createRenderImage(device, allocator, depthFormat, sceneCapacity,
+                    VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_DEPTH_BIT, sceneDepths[i]);
+                createRenderImage(device, allocator, sceneFormat, sceneCapacity,
+                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_COLOR_BIT, finalColors[i]);
+                const VkDescriptorImageInfo images[3] = {
+                    {sceneSampler, sceneColors[i].view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+                    {sceneSampler, sceneNormals[i].view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+                    {sceneSampler, sceneDepths[i].view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+                };
+                VkWriteDescriptorSet writes[3]{};
+                for (std::uint32_t b = 0; b < 3; ++b) {
+                    writes[b] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+                    writes[b].dstSet = postSets[i];
+                    writes[b].dstBinding = b;
+                    writes[b].descriptorCount = 1;
+                    writes[b].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                    writes[b].pImageInfo = &images[b];
+                }
+                vkUpdateDescriptorSets(device, 3, writes, 0, nullptr);
+                if (uiRenderer) {
+                    sceneTextures[i] = ImGui_ImplVulkan_AddTexture(sceneSampler, finalColors[i].view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                }
+            }
+        };
+        createSceneTargets(initialSceneCapacity);
         VkFormat uiFormat = VK_FORMAT_UNDEFINED;
         std::uint32_t uiImageCount = 0;
 
@@ -773,7 +887,7 @@ void run() {
                 uiRenderer = ImGui_ImplVulkan_Init(&info);
                 if (!uiRenderer) throw std::runtime_error("Initialize Vulkan editor backend");
                 for (int i = 0; i < 2; ++i) {
-                    sceneTextures[i] = ImGui_ImplVulkan_AddTexture(sceneSampler, sceneColors[i].view,
+                    sceneTextures[i] = ImGui_ImplVulkan_AddTexture(sceneSampler, finalColors[i].view,
                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
                 }
                 // Las miniaturas de materiales viven en el pool del backend: se registran de nuevo.
@@ -917,7 +1031,7 @@ void run() {
         int lastHeight = 0;
         bool recreate = true;
         std::string windowTitle;
-        std::cout << "Vulkan pixel art preview: 320 x 180\n";
+        std::cout << "Vulkan pixel art preview\n";
         while (!editor.quitApproved()) {
             glfwPollEvents();
             if (std::chrono::steady_clock::now() - lastWatch > std::chrono::seconds(1)) {
@@ -960,6 +1074,16 @@ void run() {
             }
             if (acquired != VK_SUBOPTIMAL_KHR) check(acquired, "Acquire swapchain image");
 
+            // La vista pidió en el fotograma anterior una resolución mayor que las imágenes: se agrandan
+            // antes de empezar la interfaz (que guarda referencias a sus texturas).
+            if (const auto wanted = editor.requestedSceneExtent();
+                wanted.x > sceneCapacity.width || wanted.y > sceneCapacity.height) {
+                createSceneTargets({wanted.x, wanted.y});
+                editorLog().add(LogLevel::info, "Vista: imagenes de escena de " + std::to_string(sceneCapacity.width) + " x " +
+                                                    std::to_string(sceneCapacity.height));
+            }
+            editor.setSceneCapacity({sceneCapacity.width, sceneCapacity.height});
+
             ImGui_ImplVulkan_NewFrame();
             ImGui_ImplGlfw_NewFrame();
             ImGui::NewFrame();
@@ -973,7 +1097,13 @@ void run() {
 
             const auto command = commands[frame];
             const auto& color = sceneColors[frame];
+            const auto& normals = sceneNormals[frame];
             const auto& depth = sceneDepths[frame];
+            const auto& finalColor = finalColors[frame];
+            const auto sceneView = editor.sceneView();
+            const auto& style = editor.renderStyle();
+            const VkExtent2D sceneExtent{std::min(sceneView.extent.x, sceneCapacity.width),
+                                         std::min(sceneView.extent.y, sceneCapacity.height)};
             const auto destination = images[imageIndex];
             check(vkResetCommandBuffer(command, 0), "Reset command buffer");
             VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -986,42 +1116,50 @@ void run() {
                 [&](const std::string& id) { return textures.gpuIndex(id); }, materialsVersion);
 
             // Datos del fotograma: cámara, sol y tabla de materiales.
-            const auto camera = editor.renderCamera();
+            const auto camera = sceneView.viewProj;
             FrameData frameData;
             frameData.viewProj = camera;
-            frameData.sun = glm::vec4(glm::normalize(glm::vec3{0.35f, 1.0f, 0.55f}), 0.0f);
+            frameData.sun = glm::vec4(glm::normalize(glm::vec3{0.45f, 0.85f, 0.35f}), 0.0f);
+            frameData.style = {static_cast<float>(style.lightBands), static_cast<float>(std::max(1, textures.textureSize())), 0.0f, 0.0f};
             frameData.materials = textures.table();
             std::memcpy(frameUniforms[frame].mapped, &frameData, sizeof(frameData));
             check(vmaFlushAllocation(allocator, frameUniforms[frame].allocation, 0, VK_WHOLE_SIZE), "Flush frame data");
 
-            transition(command, color.image, VK_IMAGE_ASPECT_COLOR_BIT,
-                VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                VK_PIPELINE_STAGE_2_NONE, 0, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+            // Las imágenes de la escena vienen de ser leídas por el post del fotograma anterior en este slot.
+            for (const auto* target : {&color, &normals}) {
+                transition(command, target->image, VK_IMAGE_ASPECT_COLOR_BIT,
+                    VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                    VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+            }
             transition(command, depth.image, VK_IMAGE_ASPECT_DEPTH_BIT,
                 VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                VK_PIPELINE_STAGE_2_NONE, 0,
+                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0,
                 VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
 
-            VkRenderingAttachmentInfo colorAttachment{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-            colorAttachment.imageView = color.view;
-            colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-            colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-            colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-            colorAttachment.clearValue.color = {{0.19f, 0.21f, 0.24f, 1.0f}};
+            VkRenderingAttachmentInfo colorAttachments[2]{};
+            colorAttachments[0] = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+            colorAttachments[0].imageView = color.view;
+            colorAttachments[0].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            colorAttachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            colorAttachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            colorAttachments[0].clearValue.color = {{0.19f, 0.21f, 0.24f, 1.0f}};
+            colorAttachments[1] = colorAttachments[0];
+            colorAttachments[1].imageView = normals.view;
+            colorAttachments[1].clearValue.color = {{0.5f, 1.0f, 0.5f, 0.0f}};
             VkRenderingAttachmentInfo depthAttachment{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
             depthAttachment.imageView = depth.view;
             depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
             depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-            depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
             depthAttachment.clearValue.depthStencil.depth = 1.0f;
 
             VkRenderingInfo rendering{VK_STRUCTURE_TYPE_RENDERING_INFO};
             rendering.renderArea = {{0, 0}, sceneExtent};
             rendering.layerCount = 1;
-            rendering.colorAttachmentCount = 1;
-            rendering.pColorAttachments = &colorAttachment;
+            rendering.colorAttachmentCount = 2;
+            rendering.pColorAttachments = colorAttachments;
             rendering.pDepthAttachment = &depthAttachment;
             vkCmdBeginRendering(command, &rendering);
             const VkViewport viewport{0, 0, static_cast<float>(sceneExtent.width),
@@ -1049,6 +1187,10 @@ void run() {
             vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, voxelPipeline);
             terrainRenderer.draw(command, pipelineLayout, camera, editor.scene(),
                                  [](const ge3d::Transform& transform) { return EditorView::modelMatrix(transform); });
+            vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, heightPipeline);
+            terrainRenderer.drawHeightmaps(command, pipelineLayout, camera, editor.scene(),
+                                           [](const ge3d::Transform& transform) { return EditorView::modelMatrix(transform); },
+                                           [&](const std::string& id) { return textures.gpuIndex(id); });
             const auto& terrainStats = terrainRenderer.stats();
             editor.setTerrainStats({terrainStats.terrains, terrainStats.chunks, terrainStats.visibleChunks,
                                     terrainStats.pendingChunks, terrainStats.quads, terrainStats.visibleQuads,
@@ -1071,7 +1213,47 @@ void run() {
             }
             vkCmdEndRendering(command);
 
-            transition(command, color.image, VK_IMAGE_ASPECT_COLOR_BIT,
+            // --- Pasada de estilo pixel art: contornos, aristas y reducción de colores -------------
+            for (const auto* target : {&color, &normals}) {
+                transition(command, target->image, VK_IMAGE_ASPECT_COLOR_BIT,
+                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                    VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+            }
+            transition(command, depth.image, VK_IMAGE_ASPECT_DEPTH_BIT,
+                VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+            transition(command, finalColor.image, VK_IMAGE_ASPECT_COLOR_BIT,
+                VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+            VkRenderingAttachmentInfo postAttachment{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+            postAttachment.imageView = finalColor.view;
+            postAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            postAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            postAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            VkRenderingInfo postRendering{VK_STRUCTURE_TYPE_RENDERING_INFO};
+            postRendering.renderArea = {{0, 0}, sceneExtent};
+            postRendering.layerCount = 1;
+            postRendering.colorAttachmentCount = 1;
+            postRendering.pColorAttachments = &postAttachment;
+            vkCmdBeginRendering(command, &postRendering);
+            vkCmdSetViewport(command, 0, 1, &viewport);
+            vkCmdSetScissor(command, 0, 1, &scissor);
+            vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, postPipeline);
+            vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, postLayout, 0, 1, &postSets[frame], 0, nullptr);
+            PostPush postPush;
+            postPush.outline = {style.outlines ? style.outlineDarken : 0.0f, style.outlines ? style.edgeLighten : 0.0f,
+                                style.outlineThreshold, style.edgeThreshold};
+            postPush.camera = {sceneView.nearPlane, sceneView.farPlane, static_cast<float>(style.colorLevels), style.colorDither};
+            postPush.extent = {static_cast<float>(sceneExtent.width), static_cast<float>(sceneExtent.height), 0.0f, 0.0f};
+            vkCmdPushConstants(command, postLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(postPush), &postPush);
+            vkCmdDraw(command, 3, 1, 0, 0);
+            vkCmdEndRendering(command);
+
+            transition(command, finalColor.image, VK_IMAGE_ASPECT_COLOR_BIT,
                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);

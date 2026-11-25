@@ -4,6 +4,7 @@
 #include "ge3d/SceneIO.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cctype>
 #include <filesystem>
 #include <iostream>
@@ -357,6 +358,75 @@ void testMaterialsAndImages() {
     fs::remove_all(path.parent_path(), ignored);
 }
 
+// Terreno de malla: generación, pesos, chunks compartidos, deshacer, guardado y copia independiente.
+void testHeightmap() {
+    ge3d::HeightmapSettings settings;
+    settings.chunksX = 2;
+    settings.chunksZ = 1;
+    const auto a = ge3d::generateHeightmap(settings);
+    const auto b = ge3d::generateHeightmap(settings);
+    expect(a->heights() == b->heights() && a->allWeights() == b->allWeights(), "terreno de malla determinista");
+    expect(a->verticesX() == 129 && a->verticesZ() == 65, "vertices del terreno de malla (celdas + 1)");
+    const auto [low, high] = std::minmax_element(a->heights().begin(), a->heights().end());
+    expect(*high - *low > 1.0f, "el generador crea relieve");
+
+    // Los pesos de las capas siempre suman 255.
+    auto weights = ge3d::singleLayer(0);
+    for (int i = 0; i < 20; ++i) weights = ge3d::blendTowardLayer(weights, i % 4, 0.37f);
+    int sum = 0;
+    for (int layer = 0; layer < 4; ++layer) sum += ge3d::layerWeight(weights, layer);
+    expect(sum == 255, "los pesos de las capas suman 255");
+    expect(ge3d::blendTowardLayer(ge3d::singleLayer(0), 2, 1.0f) == ge3d::singleLayer(2), "pintar del todo deja una sola capa");
+
+    // La superficie sigue la misma diagonal que la malla.
+    auto flat = ge3d::makeFlatHeightmap(settings, 2.0f);
+    flat->setHeight(1, 1, 4.0f);
+    expect(std::abs(flat->surfaceHeight(0.5f, 0.5f) - 3.0f) < 1e-4f, "altura en la diagonal de la celda");
+    expect(std::abs(flat->surfaceHeight(10.0f, 10.0f) - 2.0f) < 1e-4f, "altura lejos de la edicion");
+
+    // Un vértice del borde entre chunks cambia los dos chunks; deshacer los devuelve a la vez.
+    ge3d::Scene scene;
+    auto entity = scene.makeEntity("Terreno");
+    entity.heightmap = ge3d::HeightmapComponent{settings, ge3d::makeFlatHeightmap(settings)};
+    const auto id = scene.add(entity);
+    auto& map = *scene.find(id)->heightmap->data;
+    const auto revisionRight = map.chunkRevision(1);
+    const auto before0 = map.chunkData(0), before1 = map.chunkData(1);
+    map.setHeight(64, 10, 3.0f);
+    expect(map.chunkRevision(1) != revisionRight, "editar el borde marca el chunk vecino");
+    ge3d::EditCommand command;
+    command.label = "Elevar";
+    command.heightmapChanges.push_back({id, 0, before0, map.chunkData(0)});
+    command.heightmapChanges.push_back({id, 1, before1, map.chunkData(1)});
+    ge3d::History history;
+    history.record(command);
+    history.undo(scene);
+    expect(scene.find(id)->heightmap->data->height(64, 10) == 0.0f, "deshacer devuelve la altura del borde");
+    history.redo(scene);
+    expect(scene.find(id)->heightmap->data->height(64, 10) == 3.0f, "rehacer vuelve a aplicar la altura");
+
+    // Play trabaja sobre una copia: sus cambios no tocan el terreno de edición.
+    auto copy = scene.deepCopy();
+    copy.find(id)->heightmap->data->setHeight(5, 5, 9.0f);
+    expect(scene.find(id)->heightmap->data->height(5, 5) == 0.0f, "la copia de Play no comparte alturas");
+
+    // Guardado: alturas en 1/64 m y pesos exactos.
+    map.setHeight(7, 3, -12.34f);
+    map.setWeights(7, 3, ge3d::blendTowardLayer(ge3d::singleLayer(0), 3, 0.5f));
+    const auto parsed = ge3d::parseHeightmap(ge3d::serializeHeightmap(map));
+    expect(parsed->chunksX() == 2 && parsed->chunksZ() == 1, "tamano del terreno de malla tras guardar");
+    expect(std::abs(parsed->height(7, 3) + 12.34f) < 1.0f / 64.0f && parsed->weights(7, 3) == map.weights(7, 3),
+           "alturas y capas sobreviven al guardado");
+    expect(throwsFormatError([] { (void)ge3d::parseHeightmap(R"({"format":"ge3d.heightmap","version":1,"chunks":[1,1],"heights":"AAA=","weights":""})"); }),
+           "datos de terreno de malla incompletos se rechazan");
+
+    // Escena v4: el componente se guarda con su configuración y sus capas.
+    const auto text = ge3d::serializeScene(scene);
+    const auto reloaded = ge3d::parseScene(text);
+    const auto& component = reloaded.entities().front().heightmap;
+    expect(component && component->settings == settings && component->data, "el componente de terreno de malla se guarda en la escena");
+}
+
 void testFiles() {
     namespace fs = std::filesystem;
     const auto folder = fs::temp_directory_path() / ("ge3d_tests_" + ge3d::Uuid::generate().toString());
@@ -371,6 +441,13 @@ void testFiles() {
         terrain.terrain = ge3d::makeTerrain(smallTerrain());
         terrain.terrain->voxels->set(3, 31, 3, terrain.terrain->voxels->materialIndex("nieve"));
         const auto terrainUuid = terrain.uuid;
+        auto hills = scene.makeEntity("Colinas");
+        ge3d::HeightmapSettings hillSettings;
+        hillSettings.chunksX = 1;
+        hillSettings.chunksZ = 1;
+        hills.heightmap = ge3d::makeHeightmap(hillSettings);
+        hills.heightmap->data->setHeight(10, 20, 33.0f);
+        scene.add(hills);
         scene.add(terrain);
         ge3d::saveSceneFile(scene, path);
         auto temporary = path;
@@ -378,7 +455,10 @@ void testFiles() {
         expect(!fs::exists(temporary), "no queda archivo temporal");
         std::vector<std::string> warnings;
         const auto loaded = ge3d::loadSceneFile(path, &warnings);
-        expect(loaded.entities().size() == 5 && warnings.empty(), "volver a guardar reemplaza el archivo");
+        expect(loaded.entities().size() == 6 && warnings.empty(), "volver a guardar reemplaza el archivo");
+        const auto& loadedHills = loaded.entities()[4];
+        expect(loadedHills.heightmap && loadedHills.heightmap->data && loadedHills.heightmap->data->height(10, 20) == 33.0f,
+               "el terreno de malla editado se guarda y se recupera");
         const auto& loadedTerrain = loaded.entities().back();
         expect(loadedTerrain.uuid == terrainUuid && loadedTerrain.terrain && loadedTerrain.terrain->voxels &&
                    loadedTerrain.terrain->voxels->get(3, 31, 3) == loadedTerrain.terrain->voxels->findMaterial("nieve") &&
@@ -414,6 +494,7 @@ int main() {
     testVoxels();
     testTerrainHistory();
     testMaterialsAndImages();
+    testHeightmap();
     testFiles();
     if (failures > 0) {
         std::cerr << failures << " comprobaciones fallidas\n";

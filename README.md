@@ -4,7 +4,7 @@ Motor de escritorio para construir, programar y jugar escenas 3D pixel art desde
 
 ## Estado del repositorio
 
-El runtime C++ organiza cada objeto en componentes (Transformación, Forma y Terreno), genera y malla terrenos de vóxeles, carga materiales con texturas PNG, guarda y abre escenas en JSON y lleva un historial de deshacer y rehacer. El editor Vulkan tiene la distribución clásica de un editor de escenas: Jerarquía, Escena, Inspector, Proyecto y Consola, con barra de herramientas y modo Play. El jugador de consola permite comprobar el arranque del runtime. Los scripts Luau, la física y el audio corresponden a etapas posteriores. El avance por etapas está en [docs/roadmap.md](docs/roadmap.md).
+El runtime C++ organiza cada objeto en componentes (Transformación, Forma, Terreno y Terreno de vóxeles), genera y malla terrenos de malla y de vóxeles, carga materiales con texturas PNG, guarda y abre escenas en JSON y lleva un historial de deshacer y rehacer. El editor Vulkan tiene la distribución clásica de un editor de escenas: Jerarquía, Escena, Inspector, Proyecto y Consola, con barra de herramientas y modo Play. El jugador de consola permite comprobar el arranque del runtime. Los scripts Luau, la física y el audio corresponden a etapas posteriores. El avance por etapas está en [docs/roadmap.md](docs/roadmap.md).
 
 ## Compilación
 
@@ -31,9 +31,9 @@ El editor requiere una GPU con Vulkan 1.3, dynamic rendering y synchronization2.
 
 | Panel | Para qué sirve |
 |---|---|
-| **Jerarquía** (izquierda) | Objetos de la escena. **+** crea cajas, rampas y terrenos, el buscador filtra, clic derecho para duplicar o eliminar, doble clic para enfocar |
-| **Escena** (centro) | Vista 320 × 180. Cubo de orientación arriba a la derecha: clic en una cara para alinear la cámara. El mundo no tiene bordes: la cuadrícula sigue a la cámara, pasa a líneas cada 10 m o 100 m al alejarse y se desvanece con tramado |
-| **Inspector** (derecha) | Nombre y componentes del objeto: Transformación, Forma (primitiva y material de cada cara) y Terreno (generador y tamaño). **Agregar componente** añade Forma o Terreno; clic derecho en la cabecera de un componente lo quita |
+| **Jerarquía** (izquierda) | Objetos de la escena. **+** crea cajas, rampas y terrenos (de malla o de vóxeles), el buscador filtra, clic derecho para duplicar o eliminar, doble clic para enfocar |
+| **Escena** (centro) | Vista pixel art (ver *Estilo pixel art*). Cubo de orientación arriba a la derecha: clic en una cara para alinear la cámara. El mundo no tiene bordes: la cuadrícula sigue a la cámara, pasa a líneas cada 10 m o 100 m al alejarse y se desvanece con tramado |
+| **Inspector** (derecha) | Nombre y componentes del objeto: Transformación, Forma (primitiva y material de cada cara), Terreno (capas, generador y tamaño) y Terreno de vóxeles. **Agregar componente** los añade; clic derecho en la cabecera de un componente lo quita |
 | **Proyecto** (abajo) | Archivos de `projects/pueblo/Content`. Doble clic en una escena para abrirla |
 | **Consola** (abajo) | Mensajes del editor y de Vulkan, con filtros por tipo |
 
@@ -46,14 +46,14 @@ Con Pintar, Construir y Terreno, la barra de la vista muestra los materiales con
 | Orbitar / desplazar / acercar | Clic derecho o Alt + clic izquierdo / botón central / rueda |
 | Pintar (herramienta B) | Clic o arrastre: la cara bajo el cursor · Shift + clic: toda la pieza · Ctrl + clic: tomar el material (también de un vóxel) |
 | Construir (herramienta C) | Clic: una pieza en la celda · Arrastre: trazo · Shift + arrastre: rectángulo · Ctrl + arrastre: borrar piezas · Espacio: girar 90° |
-| Terreno (herramienta T) | Pinceles Elevar / Excavar / Pintar / Aplanar · mantener pulsado para seguir aplicando · **[** y **]**: radio |
+| Terreno (herramienta T) | Pinceles Elevar / Bajar / Pintar / Aplanar / Suavizar · mantener pulsado para seguir aplicando · **[** y **]**: radio |
 | Enfocar selección | **F** |
 | Duplicar / eliminar | **Ctrl+D** / **Supr** |
 | Deshacer / rehacer | **Ctrl+Z** / **Ctrl+Y** |
 | Nueva / abrir / guardar escena | **Ctrl+N** / **Ctrl+O** / **Ctrl+S** |
 | Play / pausa / paso | **Ctrl+P** / **Ctrl+Shift+P** / **Ctrl+Alt+P** |
 
-La escena se guarda en `projects/pueblo/Content/scenes/main.scene.json` y se abre sola al iniciar. Los vóxeles de cada terreno se guardan junto a ella, en `scenes/terrains/<uuid>.terrain.json`. El título y la Jerarquía muestran `*` cuando hay cambios sin guardar. Al cerrar, abrir otra escena o crear una nueva con cambios pendientes, el editor pregunta si guardar. Si un archivo está dañado, el editor muestra el error y conserva la escena abierta. **Ventana → Restablecer distribución** recupera los paneles cerrados.
+La escena se guarda en `projects/pueblo/Content/scenes/main.scene.json` y se abre sola al iniciar. Los datos de cada terreno se guardan junto a ella, en `scenes/terrains/<uuid>.heightmap.json` (malla) o `<uuid>.terrain.json` (vóxeles). El título y la Jerarquía muestran `*` cuando hay cambios sin guardar. Al cerrar, abrir otra escena o crear una nueva con cambios pendientes, el editor pregunta si guardar. Si un archivo está dañado, el editor muestra el error y conserva la escena abierta. **Ventana → Restablecer distribución** recupera los paneles cerrados.
 
 ### Materiales y texturas
 
@@ -69,11 +69,28 @@ Las caras y los vóxeles no guardan colores sino **materiales**, definidos en `p
 - Al guardar `materials.json` o cualquier PNG, el editor recarga las texturas solo (en menos de un segundo). Un id desconocido o un PNG que no carga se ve con cuadros magenta y aparece un aviso en la Consola.
 - `ge3d_texture_gen <carpeta Content>` regenera el juego de texturas inicial (no sobrescribe archivos existentes salvo con `--force`).
 
+### Estilo pixel art
+
+La escena no se dibuja a una resolución fija: se dibuja a la resolución de la vista dividida por el **tamaño del píxel** (3 por defecto), así que cada píxel de la escena ocupa exactamente 3 × 3 píxeles de pantalla. Encima se aplica una pasada de estilo:
+
+- **Contornos**: el borde exterior de cada objeto se oscurece con una línea de un píxel y las aristas interiores (esquinas, crestas, bordes de vóxeles) se aclaran.
+- **Luz por bandas**: el sol se cuantiza en pocos escalones, con sombras azuladas y luz cálida.
+- **Cámara estable**: la cámara avanza de píxel en píxel y la imagen se desplaza una fracción de píxel en pantalla, así que al moverse los bordes no parpadean.
+- **Colores por canal** (opcional): reduce la paleta con tramado ordenado.
+
+Todo se ajusta en el botón **Estilo** de la barra de la vista. Con tamaño de píxel 1 la escena se ve a resolución completa, con las texturas pixel art y los contornos.
+
 ### Terreno
 
-**Objeto → Terreno procedural** (o **+** en la Jerarquía) crea un terreno de vóxeles de 128 × 64 × 128 m centrado en el origen. En el Inspector se cambian la semilla, la altura base, el relieve, la anchura de las colinas, el detalle, el nivel del agua, los materiales de cada capa (superficie, subsuelo, roca, orilla, agua) y el tamaño (hasta 512 × 128 × 512 vóxeles, de 0,25 a 2 m). **Generar** crea el relieve con esa configuración; **Plano** deja un terreno llano para esculpirlo a mano. Ambas cosas se pueden deshacer.
+**Objeto → Terreno** (o **+** en la Jerarquía) crea un terreno de malla de 128 × 128 m: una rejilla de alturas suave que se modela con pinceles. Tiene 4 **capas** de material (por defecto césped, tierra, piedra y arena) que se pintan y se mezclan con tramado a nivel de texel; en las laderas el césped muestra su textura de abajo (tierra). En el Inspector se eligen las capas, la semilla, el relieve, la anchura de las colinas, la roca en pendientes y el tamaño (hasta 1.024 × 1.024 celdas de 0,25 a 2 m). **Generar** crea el relieve y **Plano** deja un terreno llano para modelarlo a mano.
 
-La herramienta **Terreno (T)** esculpe sobre cualquier terreno: **Elevar** añade vóxeles del material elegido, **Excavar** los quita, **Pintar** cambia el material de la superficie y **Aplanar** nivela a la altura donde empezó el trazo.
+Con la herramienta **Terreno (T)** sobre un terreno de malla: **Elevar** y **Bajar** suben y bajan el relieve con caída suave, **Aplanar** nivela a la altura donde empieza el trazo, **Suavizar** redondea y **Pintar** aplica la capa elegida en la barra de la vista. **Fuerza** regula la velocidad.
+
+### Terreno de vóxeles
+
+**Objeto → Terreno de voxeles** crea un terreno de bloques de 128 × 64 × 128 m centrado en el origen. En el Inspector se cambian la semilla, la altura base, el relieve, la anchura de las colinas, el detalle, el nivel del agua, los materiales de cada capa (superficie, subsuelo, roca, orilla, agua) y el tamaño (hasta 512 × 128 × 512 vóxeles, de 0,25 a 2 m). **Generar** crea el relieve con esa configuración; **Plano** deja un terreno llano para esculpirlo a mano. Ambas cosas se pueden deshacer.
+
+Sobre un terreno de vóxeles, la herramienta **Terreno (T)** trabaja por bloques: **Elevar** añade vóxeles del material elegido, **Bajar** los quita, **Pintar** cambia el material de la superficie y **Aplanar** nivela a la altura donde empezó el trazo.
 
 ## Documentación
 

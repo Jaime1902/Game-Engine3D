@@ -25,9 +25,35 @@ public:
         float fadeRadius;   // metros hasta los que se ve la cuadrícula
     };
 
+    // Estilo pixel art de la vista: lo aplican el shader de la escena (luz) y la pasada de post (contornos).
+    struct RenderStyle {
+        int pixelSize = 3;              // píxeles de pantalla por píxel de la escena (1 = sin pixelar)
+        bool outlines = true;
+        float outlineDarken = 0.45f;    // cuánto oscurece la silueta
+        float edgeLighten = 0.30f;      // cuánto aclara las aristas interiores
+        float outlineThreshold = 0.10f; // diferencia relativa de profundidad para la silueta
+        float edgeThreshold = 0.30f;    // cambio de normal para una arista
+        int lightBands = 3;             // escalones de luz (0 = luz continua)
+        int colorLevels = 0;            // niveles por canal (0 = todos los colores)
+        float colorDither = 0.7f;
+        bool snapCamera = true;         // la cámara avanza de píxel en píxel: sin parpadeo al desplazarse
+    };
+    // Cámara y tamaño con los que dibujar la escena este fotograma.
+    struct SceneView {
+        glm::mat4 viewProj{1.0f};
+        glm::uvec2 extent{322, 182};    // resolución interna con 1 píxel de margen por lado
+        float nearPlane{};
+        float farPlane{};
+    };
+
     explicit EditorView(float uiScale = 1.0f);
     void draw(ImTextureID sceneTexture);
-    [[nodiscard]] glm::mat4 renderCamera() const;
+    [[nodiscard]] SceneView sceneView() const;
+    [[nodiscard]] const RenderStyle& renderStyle() const { return style_; }
+    // Tamaño que la vista necesita (puede superar la capacidad actual de las imágenes).
+    [[nodiscard]] glm::uvec2 requestedSceneExtent() const { return requestedExtent_; }
+    // Tamaño real de las imágenes de la escena (para las coordenadas de textura de la vista).
+    void setSceneCapacity(glm::uvec2 capacity) { capacity_ = capacity; }
     [[nodiscard]] const ge3d::Scene& scene() const { return scene_; }
     [[nodiscard]] bool showGrid() const { return showGrid_; }
     [[nodiscard]] GridView gridView() const;
@@ -55,14 +81,15 @@ public:
 
 private:
     enum class Tool { hand, move, rotate, scale, paint, build, terrain };
-    enum class TerrainBrush { add, remove, paint, flatten };
+    enum class TerrainBrush { add, remove, paint, flatten, smooth };
     struct Hit {
         ge3d::EntityId entity{};
         std::uint32_t face{};       // pieza: número de cara; terreno: normal 0-5 (-X +X -Y +Y -Z +Z)
         float distance{};
         glm::vec3 point{};
         glm::vec3 normal{};
-        bool terrain{};
+        bool terrain{};             // terreno de vóxeles o de malla
+        bool heightmap{};           // terreno de malla
         glm::ivec3 voxel{};         // terreno: vóxel tocado
     };
     struct Ray {
@@ -83,9 +110,16 @@ private:
 
     [[nodiscard]] glm::mat4 view() const;
     [[nodiscard]] glm::mat4 projection() const;
+    // Ajuste de la cámara a la rejilla de píxeles: desplazamiento del mundo y resto en píxeles.
+    struct CameraSnap {
+        glm::vec3 offset{0.0f};
+        glm::vec2 subpixel{0.0f};
+    };
+    [[nodiscard]] CameraSnap cameraSnap() const;
     [[nodiscard]] Ray mouseRay(ImVec2 mouse, ImVec2 origin, ImVec2 size) const;
     [[nodiscard]] std::optional<Hit> raycast(ImVec2 mouse, ImVec2 origin, ImVec2 size) const;
     [[nodiscard]] std::optional<Hit> raycastTerrain(const ge3d::Entity& entity, const Ray& ray) const;
+    [[nodiscard]] std::optional<Hit> raycastHeightmap(const ge3d::Entity& entity, const Ray& ray) const;
     [[nodiscard]] static glm::mat4 terrainMatrix(const ge3d::Entity& entity);
     void pick(ImVec2 mouse, ImVec2 origin, ImVec2 size);
     // Dibuja el contorno (y opcionalmente el relleno) de una pieza proyectada en la vista.
@@ -106,7 +140,11 @@ private:
 
     // Terreno
     void createTerrain();
+    void createHeightmap();
     void drawTerrainComponent(ge3d::Entity& entity, const ge3d::Entity& frameStart);
+    void drawHeightmapComponent(ge3d::Entity& entity, const ge3d::Entity& frameStart);
+    void applyHeightBrush(const Hit& hit, float seconds);
+    void drawStylePopup();
     void handleTerrainTool(ImDrawList* draw, ImVec2 origin, ImVec2 size, bool canUseMouse);
     void applyTerrainBrush(const Hit& hit);
     void finishSculpt();
@@ -202,7 +240,14 @@ private:
 
     // Pinceles de terreno. El trazo guarda el contenido previo de cada chunk tocado.
     TerrainBrush terrainBrush_ = TerrainBrush::add;
-    int terrainRadius_ = 3;
+    int terrainRadius_ = 5;
+    float brushStrength_ = 0.5f;                  // terreno de malla: velocidad del pincel (0-1)
+    int paintLayer_ = 0;                          // terreno de malla: capa que pinta el pincel
+    float flattenLevel_ = 0.0f;                   // terreno de malla: altura local donde empezó Aplanar
+    std::map<int, ge3d::Heightmap::Patch> heightBefore_;
+    ge3d::HeightmapSettings newHeightmap_{};
+    ge3d::HeightmapSettings heightDraft_{};
+    ge3d::EntityId heightDraftOwner_{};
     bool sculpting_ = false;
     ge3d::EntityId sculptTarget_{};
     int flattenHeight_ = 0;
@@ -237,6 +282,12 @@ private:
     bool showWarnings_ = true;
     bool showErrors_ = true;
     std::size_t consoleRevision_ = 0;
+
+    RenderStyle style_;
+    glm::uvec2 sceneSize_{320, 180};      // resolución interna visible (sin margen)
+    glm::uvec2 requestedExtent_{322, 182};
+    glm::uvec2 capacity_{1280, 768};
+    float aspect_ = 320.0f / 180.0f;
 
     ge3d::EntityId selected_{};
     glm::vec3 pivot_{0.0f, 0.35f, 0.0f};

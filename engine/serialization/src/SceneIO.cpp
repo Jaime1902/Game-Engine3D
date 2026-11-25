@@ -3,6 +3,7 @@
 #include "ge3d/Materials.hpp"
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <charconv>
 #include <cmath>
 #include <fstream>
@@ -17,6 +18,7 @@ namespace {
 
 using Json = nlohmann::ordered_json;
 constexpr const char* formatName = "ge3d.scene";
+constexpr float heightmapUnits = 64.0f;   // pasos por metro al guardar alturas
 
 const char* primitiveName(Primitive primitive) {
     switch (primitive) {
@@ -150,6 +152,98 @@ TerrainSettings readTerrainSettings(const Json& object, const std::string& where
     return settings;
 }
 
+HeightmapSettings readHeightmapSettings(const Json& object, const std::string& where) {
+    HeightmapSettings settings;
+    const auto& chunks = member(object, "chunks", where);
+    if (!chunks.is_array() || chunks.size() != 2) fail(where + ": \"chunks\" debe ser una lista de 2 enteros");
+    for (const auto& value : chunks) {
+        if (!value.is_number_integer() || value.get<long long>() < 1 || value.get<long long>() > Heightmap::maxChunks) {
+            fail(where + ": \"chunks\" fuera de rango");
+        }
+    }
+    settings.chunksX = static_cast<int>(chunks[0].get<long long>());
+    settings.chunksZ = static_cast<int>(chunks[1].get<long long>());
+    settings.cellSize = static_cast<float>(readNumber(object, "cellSize", where, 0.05, 16.0));
+    const auto& layers = member(object, "layers", where);
+    if (!layers.is_array() || layers.size() != Heightmap::layerCount) fail(where + ": \"layers\" debe ser una lista de 4 materiales");
+    for (std::size_t i = 0; i < settings.layers.size(); ++i) settings.layers[i] = readMaterialId(layers[i], where);
+
+    const auto& generator = member(object, "generator", where);
+    if (!generator.is_object()) fail(where + ": \"generator\" debe ser un objeto");
+    const std::string at = where + " (generador)";
+    auto& g = settings.generator;
+    g.seed = static_cast<std::uint32_t>(readInteger(generator, "seed", at, 0, 4294967295LL));
+    g.amplitude = static_cast<float>(readNumber(generator, "amplitude", at, 0, Heightmap::maxHeight));
+    g.scale = static_cast<float>(readNumber(generator, "scale", at, 1, 4096));
+    g.octaves = static_cast<int>(readInteger(generator, "octaves", at, 1, 8));
+    g.rockSlope = static_cast<float>(readNumber(generator, "rockSlope", at, 0, 1));
+    return settings;
+}
+
+Json heightmapJson(const Entity& entity) {
+    const auto& settings = entity.heightmap->settings;
+    const auto& g = settings.generator;
+    Json generator = Json::object();
+    generator["seed"] = g.seed;
+    generator["amplitude"] = tidy(g.amplitude);
+    generator["scale"] = tidy(g.scale);
+    generator["octaves"] = g.octaves;
+    generator["rockSlope"] = tidy(g.rockSlope);
+    Json layers = Json::array();
+    for (const auto& layer : settings.layers) layers.push_back(layer);
+    Json heightmap = Json::object();
+    heightmap["chunks"] = Json::array({settings.chunksX, settings.chunksZ});
+    heightmap["cellSize"] = tidy(settings.cellSize);
+    heightmap["layers"] = std::move(layers);
+    heightmap["generator"] = std::move(generator);
+    heightmap["data"] = heightmapDataPath(entity);
+    return heightmap;
+}
+
+constexpr char base64Alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+std::string encodeBase64(const std::vector<std::uint8_t>& bytes) {
+    std::string text;
+    text.reserve((bytes.size() + 2) / 3 * 4);
+    for (std::size_t i = 0; i < bytes.size(); i += 3) {
+        const std::uint32_t a = bytes[i];
+        const std::uint32_t b = i + 1 < bytes.size() ? bytes[i + 1] : 0u;
+        const std::uint32_t c = i + 2 < bytes.size() ? bytes[i + 2] : 0u;
+        const std::uint32_t triple = (a << 16) | (b << 8) | c;
+        text += base64Alphabet[(triple >> 18) & 63u];
+        text += base64Alphabet[(triple >> 12) & 63u];
+        text += i + 1 < bytes.size() ? base64Alphabet[(triple >> 6) & 63u] : '=';
+        text += i + 2 < bytes.size() ? base64Alphabet[triple & 63u] : '=';
+    }
+    return text;
+}
+
+std::uint32_t base64Value(char c, const std::string& where) {
+    if (c >= 'A' && c <= 'Z') return static_cast<std::uint32_t>(c - 'A');
+    if (c >= 'a' && c <= 'z') return static_cast<std::uint32_t>(c - 'a' + 26);
+    if (c >= '0' && c <= '9') return static_cast<std::uint32_t>(c - '0' + 52);
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    fail(where + ": base64 mal formado");
+}
+
+std::vector<std::uint8_t> decodeBase64(const std::string& text, const std::string& where) {
+    if (text.size() % 4 != 0) fail(where + ": base64 mal formado");
+    std::vector<std::uint8_t> bytes;
+    bytes.reserve(text.size() / 4 * 3);
+    for (std::size_t i = 0; i < text.size(); i += 4) {
+        const bool pad2 = text[i + 2] == '=', pad3 = text[i + 3] == '=';
+        if ((pad2 && !pad3) || ((pad2 || pad3) && i + 4 != text.size())) fail(where + ": base64 mal formado");
+        const std::uint32_t triple = (base64Value(text[i], where) << 18) | (base64Value(text[i + 1], where) << 12) |
+                                     (pad2 ? 0u : base64Value(text[i + 2], where) << 6) |
+                                     (pad3 ? 0u : base64Value(text[i + 3], where));
+        bytes.push_back(static_cast<std::uint8_t>(triple >> 16));
+        if (!pad2) bytes.push_back(static_cast<std::uint8_t>(triple >> 8));
+        if (!pad3) bytes.push_back(static_cast<std::uint8_t>(triple));
+    }
+    return bytes;
+}
+
 Json terrainJson(const Entity& entity) {
     const auto& settings = entity.terrain->settings;
     const auto& g = settings.generator;
@@ -189,6 +283,10 @@ std::string terrainDataPath(const Entity& entity) {
     return "terrains/" + entity.uuid.toString() + ".terrain.json";
 }
 
+std::string heightmapDataPath(const Entity& entity) {
+    return "terrains/" + entity.uuid.toString() + ".heightmap.json";
+}
+
 // --- Escena --------------------------------------------------------------------------------------
 
 std::string serializeScene(const Scene& scene) {
@@ -211,6 +309,7 @@ std::string serializeScene(const Scene& scene) {
             item["shape"] = std::move(shape);
         }
         if (entity.terrain) item["terrain"] = terrainJson(entity);
+        if (entity.heightmap) item["heightmap"] = heightmapJson(entity);
         entities.push_back(std::move(item));
     }
     Json root = Json::object();
@@ -310,6 +409,13 @@ Scene parseSceneData(std::string_view text, bool generateTerrains) {
                 // Sin archivo, los vóxeles se generan con la configuración; loadSceneFile lee los guardados.
                 const auto settings = readTerrainSettings(terrainJson, terrainAt);
                 entity.terrain = generateTerrains ? makeTerrain(settings) : TerrainComponent{settings, nullptr};
+            }
+            if (number >= 4 && item.contains("heightmap")) {
+                const auto& heightmapItem = item["heightmap"];
+                const std::string heightmapAt = at + " (terreno de malla)";
+                if (!heightmapItem.is_object()) fail(heightmapAt + ": debe ser un objeto");
+                const auto settings = readHeightmapSettings(heightmapItem, heightmapAt);
+                entity.heightmap = generateTerrains ? makeHeightmap(settings) : HeightmapComponent{settings, nullptr};
             }
         }
         scene.add(std::move(entity));
@@ -415,6 +521,64 @@ std::shared_ptr<VoxelGrid> parseVoxels(std::string_view text) {
     return grid;
 }
 
+// --- Terreno de malla --------------------------------------------------------------------------
+
+std::string serializeHeightmap(const Heightmap& map) {
+    // Alturas en 1/64 m como enteros de 16 bits con signo (±512 m, error < 1 cm).
+    std::vector<std::uint8_t> heights;
+    heights.reserve(map.heights().size() * 2);
+    for (const float height : map.heights()) {
+        const auto value = static_cast<std::int16_t>(std::clamp(std::lround(height * heightmapUnits), -32767L, 32767L));
+        const auto bits = static_cast<std::uint16_t>(value);
+        heights.push_back(static_cast<std::uint8_t>(bits & 0xFFu));
+        heights.push_back(static_cast<std::uint8_t>(bits >> 8));
+    }
+    std::vector<std::uint8_t> weights;
+    weights.reserve(map.allWeights().size() * 4);
+    for (const auto w : map.allWeights()) {
+        for (int i = 0; i < 4; ++i) weights.push_back(static_cast<std::uint8_t>((w >> (i * 8)) & 0xFFu));
+    }
+    Json root = Json::object();
+    root["format"] = "ge3d.heightmap";
+    root["version"] = 1;
+    root["chunks"] = Json::array({map.chunksX(), map.chunksZ()});
+    root["heights"] = encodeBase64(heights);
+    root["weights"] = encodeBase64(weights);
+    return root.dump(2, ' ', false, Json::error_handler_t::replace) + "\n";
+}
+
+std::shared_ptr<Heightmap> parseHeightmap(std::string_view text) {
+    const auto root = Json::parse(text.begin(), text.end(), nullptr, false);
+    if (root.is_discarded() || !root.is_object()) fail("Los datos del terreno no son JSON valido");
+    const std::string where = "Terreno de malla";
+    if (readString(root, "format", where) != "ge3d.heightmap") fail("El archivo no contiene un terreno de malla");
+    if (readInteger(root, "version", where, 1, 1) != 1) fail(where + ": version no soportada");
+    const auto& chunks = member(root, "chunks", where);
+    if (!chunks.is_array() || chunks.size() != 2) fail(where + ": \"chunks\" debe ser una lista de 2 enteros");
+    for (const auto& value : chunks) {
+        if (!value.is_number_integer() || value.get<long long>() < 1 || value.get<long long>() > Heightmap::maxChunks) {
+            fail(where + ": \"chunks\" fuera de rango");
+        }
+    }
+    auto map = std::make_shared<Heightmap>(static_cast<int>(chunks[0].get<long long>()), static_cast<int>(chunks[1].get<long long>()));
+    const auto count = static_cast<std::size_t>(map->verticesX()) * static_cast<std::size_t>(map->verticesZ());
+    const auto heights = decodeBase64(readString(root, "heights", where), where + " (heights)");
+    const auto weights = decodeBase64(readString(root, "weights", where), where + " (weights)");
+    if (heights.size() != count * 2) fail(where + ": \"heights\" no tiene el tamano del terreno");
+    if (weights.size() != count * 4) fail(where + ": \"weights\" no tiene el tamano del terreno");
+    for (int z = 0; z < map->verticesZ(); ++z) {
+        for (int x = 0; x < map->verticesX(); ++x) {
+            const auto index = static_cast<std::size_t>(z) * static_cast<std::size_t>(map->verticesX()) + static_cast<std::size_t>(x);
+            const auto bits = static_cast<std::uint16_t>(heights[index * 2] | (heights[index * 2 + 1] << 8));
+            map->setHeight(x, z, static_cast<float>(static_cast<std::int16_t>(bits)) / heightmapUnits);
+            Heightmap::Weights w = 0;
+            for (std::size_t i = 0; i < 4; ++i) w |= static_cast<Heightmap::Weights>(weights[index * 4 + i]) << (i * 8);
+            map->setWeights(x, z, w);
+        }
+    }
+    return map;
+}
+
 // --- Archivos ------------------------------------------------------------------------------------
 
 void writeTextFileAtomic(const std::filesystem::path& path, const std::string& text) {
@@ -459,6 +623,9 @@ void saveSceneFile(const Scene& scene, const std::filesystem::path& path) {
         if (entity.terrain && entity.terrain->voxels) {
             writeTextFileAtomic(folder / pathFromUtf8(terrainDataPath(entity)), serializeVoxels(*entity.terrain->voxels));
         }
+        if (entity.heightmap && entity.heightmap->data) {
+            writeTextFileAtomic(folder / pathFromUtf8(heightmapDataPath(entity)), serializeHeightmap(*entity.heightmap->data));
+        }
     }
     writeTextFileAtomic(path, serializeScene(scene));
 }
@@ -471,6 +638,27 @@ Scene loadSceneFile(const std::filesystem::path& path, std::vector<std::string>*
         throw SceneFormatError(pathToUtf8(path.filename()) + ": " + error.what());
     }
     const auto folder = path.parent_path();
+    for (const auto& entity : scene.entities()) {
+        if (!entity.heightmap) continue;
+        const auto dataPath = folder / pathFromUtf8(heightmapDataPath(entity));
+        std::error_code error;
+        auto& component = *scene.find(entity.id)->heightmap;
+        if (!std::filesystem::exists(dataPath, error)) {
+            if (warnings) warnings->push_back("Terreno \"" + entity.name + "\" sin datos guardados: se genero con su configuracion");
+            component.data = generateHeightmap(component.settings);
+            continue;
+        }
+        std::shared_ptr<Heightmap> map;
+        try {
+            map = parseHeightmap(readTextFile(dataPath));
+        } catch (const SceneFormatError& failure) {
+            throw SceneFormatError(pathToUtf8(dataPath.filename()) + ": " + failure.what());
+        }
+        if (map->chunksX() != component.settings.chunksX || map->chunksZ() != component.settings.chunksZ) {
+            throw SceneFormatError(pathToUtf8(dataPath.filename()) + ": el tamano no coincide con el de la escena");
+        }
+        component.data = std::move(map);
+    }
     for (const auto& entity : scene.entities()) {
         if (!entity.terrain) continue;
         const auto dataPath = folder / pathFromUtf8(terrainDataPath(entity));

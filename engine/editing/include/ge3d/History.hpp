@@ -26,13 +26,22 @@ struct TerrainChange {
     std::vector<VoxelGrid::Voxel> after;
 };
 
+// Cambio de las alturas y capas de un chunk de terreno de malla.
+struct HeightmapChange {
+    EntityId entity{};
+    int chunk{};
+    Heightmap::Patch before;
+    Heightmap::Patch after;
+};
+
 // Una operación de edición que se deshace de una vez (un trazo, un arrastre de gizmo, un duplicado...).
 // Al aplicarla primero van los cambios de entidad y después los de terreno; al deshacer, al revés.
 struct EditCommand {
     std::string label;
     std::vector<EntityChange> changes;
     std::vector<TerrainChange> terrainChanges;
-    [[nodiscard]] bool empty() const noexcept { return changes.empty() && terrainChanges.empty(); }
+    std::vector<HeightmapChange> heightmapChanges;
+    [[nodiscard]] bool empty() const noexcept { return changes.empty() && terrainChanges.empty() && heightmapChanges.empty(); }
 };
 
 class History {

@@ -22,6 +22,7 @@ add_library(ge3d_runtime STATIC
     scene/src/Uuid.cpp
     geometry/src/Primitives.cpp
     terrain/src/Voxel.cpp
+    terrain/src/Heightmap.cpp
     editing/src/History.cpp
     serialization/src/SceneIO.cpp
     assets/src/Materials.cpp
@@ -43,7 +44,7 @@ target_include_directories(ge3d_runtime PUBLIC
 target_include_directories(ge3d_runtime SYSTEM PRIVATE "${stb_SOURCE_DIR}")
 # Generación y mallado de vóxeles son bucles muy calientes: con GCC/Clang se optimizan también en
 # Debug para que el editor de desarrollo no sea 6 veces más lento al cargar o esculpir terrenos.
-set_source_files_properties(terrain/src/Voxel.cpp PROPERTIES
+set_source_files_properties(terrain/src/Voxel.cpp terrain/src/Heightmap.cpp PROPERTIES
     COMPILE_OPTIONS "$<$<AND:$<CONFIG:Debug>,$<NOT:$<CXX_COMPILER_ID:MSVC>>>:-O2>")
 # Image.cpp solo contiene la implementación de stb (código externo): sin avisos.
 set_source_files_properties(assets/src/Image.cpp PROPERTIES
