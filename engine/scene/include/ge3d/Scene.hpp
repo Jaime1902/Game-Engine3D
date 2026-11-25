@@ -131,13 +131,27 @@ struct PlayerComponent {
 // Ruta de sonido válida: relativa, sin "..", .wav.
 [[nodiscard]] bool isValidSoundPath(const std::string& path);
 
+// Instancia de un prefab: de qué archivo viene esta entidad y a qué entidad del prefab corresponde.
+// overrides lista los componentes que la instancia cambió respecto al prefab ("name", "transform",
+// "shape", "script"...): al actualizar el prefab, esos se conservan y el resto se sustituye.
+struct PrefabLink {
+    std::string asset;          // ruta en Content, p. ej. "prefabs/farol.prefab.json"
+    Uuid source{};              // UUID de la entidad dentro del prefab
+    std::vector<std::string> overrides;
+    friend bool operator==(const PrefabLink&, const PrefabLink&) = default;
+};
+
 struct Entity {
     EntityId id{};
     Uuid uuid{};
     std::string name;
     // Inactiva: se queda en la escena pero no se dibuja, no choca, no suena y sus scripts no corren.
+    // Desactivar un padre desactiva también a sus hijos.
     bool active{true};
+    // Padre en la jerarquía (0 = en la raíz). transform es relativa al padre.
+    EntityId parent{};
     Transform transform{};
+    std::optional<PrefabLink> prefab;
     std::optional<ShapeComponent> shape;
     std::optional<TerrainComponent> terrain;
     std::optional<HeightmapComponent> heightmap;
@@ -175,5 +189,22 @@ private:
 };
 
 [[nodiscard]] Scene makeStarterScene();
+
+// --- Jerarquía padre/hijo -------------------------------------------------------------------------
+// La transformación de una entidad es local a su padre. La del mundo combina la cadena de padres
+// (posición rotada y escalada, rotaciones compuestas, escalas multiplicadas por eje: no hay cizalla).
+[[nodiscard]] Transform worldTransform(const Scene& scene, const Entity& entity);
+// Transformación local que deja a la entidad en world si su padre es parent (0 = raíz).
+[[nodiscard]] Transform localTransform(const Scene& scene, EntityId parent, const Transform& world);
+// Activa ella y todos sus padres.
+[[nodiscard]] bool activeInHierarchy(const Scene& scene, const Entity& entity);
+// Hijos directos en el orden de la escena.
+[[nodiscard]] std::vector<EntityId> childrenOf(const Scene& scene, EntityId parent);
+// Toda la descendencia (sin la propia entidad), padres antes que hijos.
+[[nodiscard]] std::vector<EntityId> descendantsOf(const Scene& scene, EntityId root);
+// true si ancestor está en la cadena de padres de entity.
+[[nodiscard]] bool isAncestor(const Scene& scene, EntityId ancestor, EntityId entity);
+// Rotación en grados (convención del editor) compuesta: primero b, después a.
+[[nodiscard]] Vec3 composeRotations(Vec3 aDegrees, Vec3 bDegrees);
 
 }

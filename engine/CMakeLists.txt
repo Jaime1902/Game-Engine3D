@@ -24,6 +24,7 @@ add_library(ge3d_runtime STATIC
     terrain/src/Voxel.cpp
     terrain/src/Heightmap.cpp
     editing/src/History.cpp
+    editing/src/Prefab.cpp
     serialization/src/SceneIO.cpp
     assets/src/Materials.cpp
     assets/src/Image.cpp

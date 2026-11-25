@@ -1215,9 +1215,9 @@ void run(const std::filesystem::path& initialScene) {
             vkCmdBindIndexBuffer(command, indices.handle, 0, VK_INDEX_TYPE_UINT32);
             vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, cubePipeline);
             for (const auto& entity : editor.scene().entities()) {
-                if (!entity.shape || !entity.active) continue;
+                if (!entity.shape || !ge3d::activeInHierarchy(editor.scene(), entity)) continue;
                 ScenePush push;
-                push.model = EditorView::modelMatrix(entity.transform);
+                push.model = EditorView::modelMatrix(ge3d::worldTransform(editor.scene(), entity));
                 push.grid.w = modePiece;
                 push.data = packFaceMaterials(*entity.shape, textures);
                 const auto mesh = entity.shape->primitive == ge3d::Primitive::box ? geometry.box : geometry.ramp;
@@ -1227,15 +1227,15 @@ void run(const std::filesystem::path& initialScene) {
             // Terreno de vóxeles: chunks visibles desde la cámara.
             vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, voxelPipeline);
             terrainRenderer.draw(command, pipelineLayout, camera, editor.scene(),
-                                 [](const ge3d::Transform& transform) { return EditorView::modelMatrix(transform); });
+                                 [&](const ge3d::Entity& entity) { return EditorView::modelMatrix(ge3d::worldTransform(editor.scene(), entity)); });
             vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, heightPipeline);
             terrainRenderer.drawHeightmaps(command, pipelineLayout, camera, editor.scene(),
-                                           [](const ge3d::Transform& transform) { return EditorView::modelMatrix(transform); },
+                                           [&](const ge3d::Entity& entity) { return EditorView::modelMatrix(ge3d::worldTransform(editor.scene(), entity)); },
                                            [&](const std::string& id) { return textures.gpuIndex(id); });
             // Agua después de todo lo opaco: su tramado deja ver el fondo ya dibujado.
             vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, waterPipeline);
             terrainRenderer.drawWater(command, pipelineLayout, camera, editor.scene(),
-                                      [](const ge3d::Transform& transform) { return EditorView::modelMatrix(transform); },
+                                      [&](const ge3d::Entity& entity) { return EditorView::modelMatrix(ge3d::worldTransform(editor.scene(), entity)); },
                                       [&](const std::string& id) { return textures.gpuIndex(id); });
             const auto& terrainStats = terrainRenderer.stats();
             editor.setTerrainStats({terrainStats.terrains, terrainStats.chunks, terrainStats.visibleChunks,

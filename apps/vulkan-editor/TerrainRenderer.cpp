@@ -364,16 +364,16 @@ bool outsideFrustum(const glm::mat4& clipFromModel, glm::vec3 minimum, glm::vec3
 }
 
 void TerrainRenderer::draw(VkCommandBuffer command, VkPipelineLayout layout, const glm::mat4& viewProj, const ge3d::Scene& scene,
-                           const std::function<glm::mat4(const ge3d::Transform&)>& modelMatrix) {
+                           const std::function<glm::mat4(const ge3d::Entity&)>& modelMatrix) {
     vkCmdBindIndexBuffer(command, quadIndices_.handle, 0, VK_INDEX_TYPE_UINT32);
     int boundPage = -1;
     for (const auto& entity : scene.entities()) {
-        if (!entity.terrain || !entity.terrain->voxels || !entity.active) continue;
+        if (!entity.terrain || !entity.terrain->voxels || !ge3d::activeInHierarchy(scene, entity)) continue;
         const auto found = terrains_.find(entity.id);
         if (found == terrains_.end() || found->second.grid != entity.terrain->voxels.get()) continue;
         const auto& terrain = found->second;
         const float voxel = entity.terrain->settings.voxelSize;
-        const glm::mat4 model = modelMatrix(entity.transform) * glm::scale(glm::mat4{1.0f}, glm::vec3{voxel});
+        const glm::mat4 model = modelMatrix(entity) * glm::scale(glm::mat4{1.0f}, glm::vec3{voxel});
         const glm::mat4 clipFromModel = viewProj * model;
         for (int index = 0; index < static_cast<int>(terrain.chunks.size()); ++index) {
             const auto& chunk = terrain.chunks[static_cast<std::size_t>(index)];
@@ -401,18 +401,18 @@ void TerrainRenderer::draw(VkCommandBuffer command, VkPipelineLayout layout, con
 }
 
 void TerrainRenderer::drawHeightmaps(VkCommandBuffer command, VkPipelineLayout layout, const glm::mat4& viewProj,
-                                     const ge3d::Scene& scene, const std::function<glm::mat4(const ge3d::Transform&)>& modelMatrix,
+                                     const ge3d::Scene& scene, const std::function<glm::mat4(const ge3d::Entity&)>& modelMatrix,
                                      const MaterialLookup& lookup) {
     vkCmdBindIndexBuffer(command, heightIndices_.handle, 0, VK_INDEX_TYPE_UINT32);
     int boundPage = -1;
     constexpr float chunkCells = static_cast<float>(ge3d::Heightmap::chunkCells);
     for (const auto& entity : scene.entities()) {
-        if (!entity.heightmap || !entity.heightmap->data || !entity.active) continue;
+        if (!entity.heightmap || !entity.heightmap->data || !ge3d::activeInHierarchy(scene, entity)) continue;
         const auto found = heightmaps_.find(entity.id);
         if (found == heightmaps_.end() || found->second.map != entity.heightmap->data.get()) continue;
         const auto& terrain = found->second;
         const auto& settings = entity.heightmap->settings;
-        const glm::mat4 model = modelMatrix(entity.transform);
+        const glm::mat4 model = modelMatrix(entity);
         const glm::mat4 clipFromModel = viewProj * model;
         std::uint32_t layers[ge3d::Heightmap::layerCount];
         for (std::size_t i = 0; i < settings.layers.size(); ++i) layers[i] = lookup(settings.layers[i]) & 0xFFFFu;
@@ -447,18 +447,18 @@ void TerrainRenderer::drawHeightmaps(VkCommandBuffer command, VkPipelineLayout l
 }
 
 void TerrainRenderer::drawWater(VkCommandBuffer command, VkPipelineLayout layout, const glm::mat4& viewProj, const ge3d::Scene& scene,
-                                const std::function<glm::mat4(const ge3d::Transform&)>& modelMatrix, const MaterialLookup& lookup) {
+                                const std::function<glm::mat4(const ge3d::Entity&)>& modelMatrix, const MaterialLookup& lookup) {
     static_assert(sizeof(ge3d::WaterVertex) == sizeof(ge3d::HeightVertex), "el agua usa el mismo tamano de chunk que el terreno");
     vkCmdBindIndexBuffer(command, heightIndices_.handle, 0, VK_INDEX_TYPE_UINT32);
     int boundPage = -1;
     constexpr float chunkCells = static_cast<float>(ge3d::Heightmap::chunkCells);
     for (const auto& entity : scene.entities()) {
-        if (!entity.heightmap || !entity.heightmap->data || !entity.active) continue;
+        if (!entity.heightmap || !entity.heightmap->data || !ge3d::activeInHierarchy(scene, entity)) continue;
         const auto found = heightmaps_.find(entity.id);
         if (found == heightmaps_.end() || found->second.map != entity.heightmap->data.get()) continue;
         const auto& terrain = found->second;
         const auto& settings = entity.heightmap->settings;
-        const glm::mat4 model = modelMatrix(entity.transform);
+        const glm::mat4 model = modelMatrix(entity);
         const glm::mat4 clipFromModel = viewProj * model;
         const std::uint32_t material = lookup(settings.waterMaterial) & 0xFFFFu;
         for (int index = 0; index < static_cast<int>(terrain.water.size()); ++index) {

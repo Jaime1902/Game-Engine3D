@@ -49,6 +49,10 @@ struct ScriptServices {
     std::function<void(const std::string& clip, float volume, std::optional<Vec3> position)> playSound;
     std::function<void(EntityId, bool play)> emitter;
     std::function<EntityId()> player;
+    // Crea una instancia de un prefab (ruta en Content) en esa posición y devuelve su raíz (0 si falla).
+    std::function<EntityId(const std::string& prefab, Vec3 position)> spawn;
+    // Quita la entidad y sus hijos de la escena de Play.
+    std::function<void(EntityId)> destroy;
 };
 
 // Ejecuta los ScriptComponent de una escena en modo Play.

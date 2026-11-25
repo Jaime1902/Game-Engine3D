@@ -20,6 +20,10 @@ Se propone GLFW, Dear ImGui Docking, ImGuizmo, EnTT, VMA, Jolt y miniaudio. Intr
 
 Por ahora los componentes viven en la propia entidad (`std::optional`) y no en un registro EnTT: el historial de deshacer y el modo Play copian entidades completas, y con pocos miles de objetos recorrer un vector es suficiente. EnTT se incorporará cuando haya sistemas que iteren por tipo de componente cada fotograma (física y scripts, etapas 3 y 4) o cuando las mediciones de la etapa 6 lo pidan; el formato de escena no cambia con ese paso.
 
+Cada entidad tiene un padre opcional (`parent`, guardado por UUID): su `Transform` es local y `worldTransform` combina la cadena (sin cizalla: las escalas se multiplican por eje). Física, audio, scripts y render usan la del mundo; desactivar un padre desactiva la rama (`activeInHierarchy`).
+
+Los prefabs (`engine/editing/Prefab.hpp`) son archivos `*.prefab.json` con el formato de escena. Una instancia lleva en cada entidad un `PrefabLink` (archivo, UUID de su entidad en el prefab y lista de componentes cambiados). Sincronizar copia del prefab los componentes no cambiados, añade las entidades nuevas y quita las desaparecidas, en un comando que se deshace; la transformación de la raíz y los datos de terreno son siempre de la instancia.
+
 Los datos de un terreno se comparten entre copias de la entidad (`std::shared_ptr`), de modo que deshacer o duplicar una transformación no copia megabytes. Las ediciones se deshacen por chunk (`TerrainChange` para vóxeles, `HeightmapChange` para la malla, cuyos chunks comparten la fila de vértices del borde), regenerar sustituye la rejilla entera, y Play trabaja sobre `Scene::deepCopy()` para que el juego nunca toque los vóxeles de edición.
 
 ## Actualización y propiedad

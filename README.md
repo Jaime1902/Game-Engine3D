@@ -32,7 +32,7 @@ El editor requiere una GPU con Vulkan 1.3, dynamic rendering y synchronization2.
 
 | Panel | Para qué sirve |
 |---|---|
-| **Jerarquía** (izquierda) | Objetos de la escena. **+** o clic derecho crea objetos; **Ctrl+clic** y **Shift+clic** seleccionan varios; arrastrar reordena; **F2** renombra; clic derecho: copiar, pegar, duplicar, activar/desactivar. Los inactivos se ven atenuados |
+| **Jerarquía** (izquierda) | Árbol de objetos. Arrastrar un objeto **encima** de otro lo hace su hijo (se mueve, gira y se desactiva con él); en el **borde** de arriba o de abajo lo coloca antes o después; al hueco de abajo lo saca a la raíz. **Ctrl+clic** y **Shift+clic** seleccionan varios; **F2** renombra; clic derecho: copiar, pegar, duplicar, crear hijo vacío, sacar del padre, activar/desactivar. Inactivos atenuados; copias de prefab en azul |
 | **Escena** (centro) | Vista pixel art (ver *Estilo pixel art*). Cubo de orientación arriba a la derecha: clic en una cara para alinear la cámara. El mundo no tiene bordes: la cuadrícula sigue a la cámara, pasa a líneas cada 10 m o 100 m al alejarse y se desvanece con tramado |
 | **Inspector** (derecha) | Casilla de activo, nombre y componentes. El botón **...** (o clic derecho) de cada componente: Restablecer, Copiar valores, Pegar valores y Quitar. **Agregar componente** tiene buscador (escribe y pulsa Intro). Soltar aquí un script, sonido o material lo asigna |
 | **Proyecto** (abajo) | Carpetas a la izquierda y recursos con iconos a la derecha, más la carpeta virtual **Materiales**. Doble clic abre (escena, script, carpeta) o escucha (sonido). **Arrastra** materiales, scripts y sonidos sobre un objeto de la Escena o la Jerarquía (Shift: material solo en esa cara). Clic derecho: crear carpeta, script o escena, renombrar (actualiza las referencias de la escena), eliminar (a la papelera) y mostrar en el Explorador. Buscador en todo el proyecto |
@@ -75,6 +75,17 @@ Las caras y los vóxeles no guardan colores sino **materiales**, definidos en `p
 - Al guardar `materials.json` o cualquier PNG, el editor recarga las texturas solo (en menos de un segundo). Un id desconocido o un PNG que no carga se ve con cuadros magenta y aparece un aviso en la Consola.
 - `ge3d_texture_gen <carpeta Content>` regenera el juego de texturas inicial (no sobrescribe archivos existentes salvo con `--force`).
 
+### Prefabs
+
+Un prefab es un objeto (con sus hijos) guardado como plantilla reutilizable, como en Unity:
+
+1. **Crear**: arrastra un objeto de la Jerarquía al panel Proyecto. Se guarda `Nombre.prefab.json` en la carpeta abierta y el objeto pasa a ser una copia del prefab (en azul).
+2. **Usar**: arrastra el prefab a la Escena (se apoya donde apuntas) o a la Jerarquía (encima de un objeto queda como hijo). Desde un script: `scene.spawn("prefabs/enemigo.prefab.json", posicion)`.
+3. **Editar**: doble clic en el prefab (o **Abrir** en el Inspector). Se edita aislado; **Ctrl+S** lo guarda y **< Volver** regresa a la escena, donde todas las copias ya tienen los cambios.
+4. **Cambios por copia**: lo que cambies en una copia se marca con una barra azul en su componente y se conserva aunque el prefab cambie. En el Inspector: **Revertir** (volver al prefab), **Aplicar** (llevar los cambios de esta copia al prefab y a todas las demás) y, en el menú **...** de un componente, **Revertir al prefab**. **Desempaquetar** (clic derecho en la Jerarquía) la convierte en objetos normales.
+
+La posición de cada copia es suya. Los datos de un terreno se copian al crear la copia y después son de ella (se sincroniza solo su configuración).
+
 ### Física, sonido y jugador en primera persona
 
 **Para probarlo rápido:** `build demo` abre `scenes/demo_fisica.scene.json` (una habitación con rampa, plataforma, cajas, una puerta programada, una fuente con sonido y música fuera). Pulsa **Play** y haz clic en la vista:
@@ -91,7 +102,7 @@ Las caras y los vóxeles no guardan colores sino **materiales**, definidos en `p
 - **Agregar componente → Cuerpo físico:** *Dinámico* cae, choca, se empuja y flota en el agua del terreno; *Cinemático* lo mueve un script y empuja a los demás; *Zona (trigger)* no choca y avisa a los scripts con `onTriggerEnter` / `onTriggerExit` (como la campana de la demo).
 - **Fuente de audio:** un WAV de `Content/sounds` en bucle o una vez, con volumen y distancias. En 3D se oye a volumen completo dentro de la distancia mínima y deja de oírse en la máxima: al acercarte a la fuente de la demo sube el sonido del agua. **>** lo escucha desde el Inspector.
 - **Jugador:** **Objeto → Jugador (primera persona)** coloca dónde aparece (la flecha verde indica hacia dónde mira). Sin Jugador, Play usa la cámara del editor y la física funciona igual.
-- **Scripts:** `entity.velocity`, `entity:applyImpulse(v)`, `entity:playSound(clip)`, `audio.play(clip)`, `scene.player()` y los callbacks `onTriggerEnter`, `onTriggerExit` y `onCollision`.
+- **Scripts:** `entity.velocity`, `entity:applyImpulse(v)`, `entity:playSound(clip)`, `audio.play(clip)`, `scene.player()` y los callbacks `onTriggerEnter`, `onTriggerExit` y `onCollision`. Jerarquía y objetos nuevos: `entity.position` y `entity.rotation` son del mundo, `entity.localPosition` y `entity.localRotation` relativas al padre, `entity.parent` (se puede cambiar), `entity.active`, `scene.spawn(prefab, posicion)` y `entity:destroy()`.
 - `ge3d_sound_gen <carpeta Content>` regenera los sonidos de ejemplo (sintetizados, WAV de 16 bits a 44,1 kHz).
 
 ### Scripts (Luau)

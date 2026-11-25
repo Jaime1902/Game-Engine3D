@@ -89,6 +89,10 @@ private:
 [[nodiscard]] EditCommand makePasteCommand(Scene& scene, const std::vector<Entity>& entities, std::vector<EntityId>* created = nullptr);
 // Cambia la posición de una entidad en la lista de la escena (orden de la Jerarquía).
 [[nodiscard]] std::optional<EditCommand> makeMoveCommand(const Scene& scene, EntityId id, std::size_t newIndex);
+// Cambia de padre (0 = raíz) las entidades indicadas conservando su posición en el mundo y las coloca
+// junto a anchor (antes o después; sin anchor, al final). Ignora las que crearían un ciclo.
+[[nodiscard]] std::optional<EditCommand> makeReparentCommand(const Scene& scene, const std::vector<EntityId>& ids, EntityId parent,
+                                                             EntityId anchor, bool after);
 // Varias modificaciones ya aplicadas (antes de cada entidad) como un solo paso.
 [[nodiscard]] std::optional<EditCommand> makeModifyCommand(const Scene& scene, const std::vector<Entity>& before, std::string label);
 // Compara "before" con el estado actual de la misma entidad en la escena.

@@ -8,6 +8,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdlib>
+#include <deque>
 #include <map>
 #include <string_view>
 
@@ -105,7 +106,9 @@ struct ScriptHost::Impl {
         int module{LUA_NOREF};
         bool disabled{};
     };
-    std::vector<Instance> instances;
+    // deque: crear objetos desde un script añade instancias mientras otras se están ejecutando, y sus
+    // referencias deben seguir siendo válidas.
+    std::deque<Instance> instances;
     const Instance* current{};
 
     struct Message {
@@ -133,6 +136,7 @@ struct ScriptHost::Impl {
     std::optional<int> loadModule(const std::string& path, std::vector<ScriptDiagnostic>* diagnostics);
     std::optional<int> moduleFor(const std::string& path);
     void createInstance(const Entity& entity);
+    void spawned(EntityId root);
     bool call(Instance& instance, const char* callback, int args);
     void disable(Instance& instance, const char* callback, const std::string& error);
 };
@@ -253,13 +257,28 @@ int entityStopAudio(lua_State* L) {
     return 0;
 }
 
+int entityDestroy(lua_State* L) {
+    const auto& entity = checkEntity(L, 1);
+    if (auto* impl = implOf(L); impl->services.destroy) impl->services.destroy(entity.id);
+    return 0;
+}
+
 int entityIndex(lua_State* L) {
     auto& entity = checkEntity(L, 1);
     const std::string key = luaL_checkstring(L, 2);
     const auto push = [&](const Vec3& v) { lua_pushvector(L, v.x, v.y, v.z); };
-    if (key == "position") push(entity.transform.position);
-    else if (key == "rotation") push(entity.transform.rotationDegrees);
+    auto* impl = implOf(L);
+    // position y rotation son del mundo (como en Unity); localPosition y localRotation, relativas al padre.
+    if (key == "position") push(worldTransform(*impl->scene, entity).position);
+    else if (key == "rotation") push(worldTransform(*impl->scene, entity).rotationDegrees);
+    else if (key == "localPosition") push(entity.transform.position);
+    else if (key == "localRotation") push(entity.transform.rotationDegrees);
     else if (key == "scale") push(entity.transform.scale);
+    else if (key == "active") lua_pushboolean(L, entity.active);
+    else if (key == "parent") {
+        if (entity.parent && impl->scene->find(entity.parent)) pushEntity(L, entity.parent);
+        else lua_pushnil(L);
+    } else if (key == "destroy") lua_pushcfunction(L, entityDestroy, "destroy");
     else if (key == "name") lua_pushstring(L, entity.name.c_str());
     else if (key == "id") lua_pushnumber(L, static_cast<double>(entity.id));
     else if (key == "send") lua_pushcfunction(L, entitySend, "send");
@@ -272,16 +291,36 @@ int entityIndex(lua_State* L) {
     else if (key == "playSound") lua_pushcfunction(L, entityPlaySound, "playSound");
     else if (key == "playAudio") lua_pushcfunction(L, entityPlayAudio, "playAudio");
     else if (key == "stopAudio") lua_pushcfunction(L, entityStopAudio, "stopAudio");
-    else luaL_error(L, "Entity no tiene el campo '%s' (position, rotation, scale, velocity, name, id, send, applyImpulse, "
-                       "playSound, playAudio, stopAudio)", key.c_str());
+    else luaL_error(L, "Entity no tiene el campo '%s' (position, rotation, localPosition, localRotation, scale, velocity, "
+                       "active, parent, name, id, send, applyImpulse, playSound, playAudio, stopAudio, destroy)", key.c_str());
     return 1;
 }
 
 int entityNewIndex(lua_State* L) {
     auto& entity = checkEntity(L, 1);
     const std::string key = luaL_checkstring(L, 2);
-    if (key == "position") entity.transform.position = checkVector(L, 3, "position");
-    else if (key == "rotation") entity.transform.rotationDegrees = checkVector(L, 3, "rotation");
+    auto* impl = implOf(L);
+    if (key == "position" || key == "rotation") {
+        Transform world = worldTransform(*impl->scene, entity);
+        if (key == "position") world.position = checkVector(L, 3, "position");
+        else world.rotationDegrees = checkVector(L, 3, "rotation");
+        const auto local = localTransform(*impl->scene, entity.parent, world);
+        entity.transform.position = local.position;
+        entity.transform.rotationDegrees = local.rotationDegrees;
+    } else if (key == "localPosition") entity.transform.position = checkVector(L, 3, "localPosition");
+    else if (key == "localRotation") entity.transform.rotationDegrees = checkVector(L, 3, "localRotation");
+    else if (key == "active") entity.active = lua_toboolean(L, 3) != 0;
+    else if (key == "parent") {
+        // Cambiar de padre conserva la posición en el mundo.
+        EntityId parent = 0;
+        if (!lua_isnil(L, 3)) {
+            parent = checkEntity(L, 3).id;
+            if (parent == entity.id || isAncestor(*impl->scene, entity.id, parent)) luaL_error(L, "ese padre crearia un ciclo");
+        }
+        const Transform world = worldTransform(*impl->scene, entity);
+        entity.parent = parent;
+        entity.transform = localTransform(*impl->scene, parent, world);
+    }
     else if (key == "scale") {
         const auto scale = checkVector(L, 3, "scale");
         if (!(scale.x > 0 && scale.y > 0 && scale.z > 0)) luaL_error(L, "la escala debe ser mayor que cero");
@@ -363,6 +402,21 @@ int scenePlayer(lua_State* L) {
     return 1;
 }
 
+int sceneSpawn(lua_State* L) {
+    const std::string prefab = luaL_checkstring(L, 1);
+    const Vec3 position = lua_isnoneornil(L, 2) ? Vec3{} : checkVector(L, 2, "la posicion");
+    auto* impl = implOf(L);
+    const EntityId root = impl->services.spawn ? impl->services.spawn(prefab, position) : EntityId{};
+    if (!root || !impl->scene->find(root)) {
+        lua_pushnil(L);
+        return 1;
+    }
+    // Los scripts de lo creado empiezan ya (su onStart corre ahora, con su propio presupuesto).
+    impl->spawned(root);
+    pushEntity(L, root);
+    return 1;
+}
+
 int audioPlay(lua_State* L) {
     const std::string clip = luaL_checkstring(L, 1);
     const double volume = luaL_optnumber(L, 2, 1.0);
@@ -417,6 +471,7 @@ bool ScriptHost::Impl::open() {
     setFunction(L, "send", sceneSend);
     setFunction(L, "time", sceneTime);
     setFunction(L, "player", scenePlayer);
+    setFunction(L, "spawn", sceneSpawn);
     lua_setglobal(L, "scene");
     lua_newtable(L);
     setFunction(L, "play", audioPlay);
@@ -550,6 +605,17 @@ void ScriptHost::Impl::createInstance(const Entity& entity) {
     call(instances.back(), "onStart", 0);
 }
 
+void ScriptHost::Impl::spawned(EntityId root) {
+    if (!scene) return;
+    std::vector<EntityId> ids{root};
+    const auto rest = descendantsOf(*scene, root);
+    ids.insert(ids.end(), rest.begin(), rest.end());
+    for (const auto id : ids) {
+        const auto* entity = scene->find(id);
+        if (entity && entity->script && entity->script->enabled && activeInHierarchy(*scene, *entity)) createInstance(*entity);
+    }
+}
+
 void ScriptHost::Impl::disable(Instance& instance, const char* callback, const std::string& error) {
     instance.disabled = true;
     if (scene) {
@@ -609,11 +675,10 @@ void ScriptHost::start(Scene& scene) {
         impl.report(true, "Scripts: no se pudo crear la maquina virtual de Luau");
         return;
     }
-    impl.instances.reserve(scene.entities().size());
     // Se copian los ids primero: onStart puede cambiar la escena.
     std::vector<EntityId> ids;
     for (const auto& entity : scene.entities()) {
-        if (entity.active && entity.script && entity.script->enabled && !entity.script->path.empty()) ids.push_back(entity.id);
+        if (activeInHierarchy(scene, entity) && entity.script && entity.script->enabled && !entity.script->path.empty()) ids.push_back(entity.id);
     }
     for (const auto id : ids) {
         if (const auto* entity = scene.find(id)) impl.createInstance(*entity);

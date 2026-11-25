@@ -2,6 +2,7 @@
 
 #include "ge3d/Audio.hpp"
 #include "ge3d/History.hpp"
+#include "ge3d/Prefab.hpp"
 #include "ge3d/Physics.hpp"
 #include "ge3d/Materials.hpp"
 #include "ge3d/Scene.hpp"
@@ -92,6 +93,8 @@ public:
     void requestQuit();
     [[nodiscard]] bool quitApproved() const { return quitApproved_; }
     static glm::mat4 modelMatrix(const ge3d::Transform& transform);
+    // Matriz del objeto en el mundo (con la cadena de padres).
+    [[nodiscard]] glm::mat4 worldMatrix(const ge3d::Entity& entity) const;
 
 private:
     enum class Tool { hand, move, rotate, scale, paint, build, terrain };
@@ -134,7 +137,7 @@ private:
     [[nodiscard]] std::optional<Hit> raycast(ImVec2 mouse, ImVec2 origin, ImVec2 size) const;
     [[nodiscard]] std::optional<Hit> raycastTerrain(const ge3d::Entity& entity, const Ray& ray) const;
     [[nodiscard]] std::optional<Hit> raycastHeightmap(const ge3d::Entity& entity, const Ray& ray) const;
-    [[nodiscard]] static glm::mat4 terrainMatrix(const ge3d::Entity& entity);
+    [[nodiscard]] glm::mat4 terrainMatrix(const ge3d::Entity& entity) const;
     void pick(ImVec2 mouse, ImVec2 origin, ImVec2 size);
     // Dibuja el contorno (y opcionalmente el relleno) de una pieza proyectada en la vista.
     // face < 0 dibuja la pieza entera; si no, solo esa cara.
@@ -275,6 +278,27 @@ private:
     // script (componente Script) o sonido (Fuente de audio).
     void applyAsset(const std::string& asset, ge3d::EntityId entity, std::optional<std::uint32_t> face);
 
+    // Prefabs (EditorPrefabs.cpp).
+    struct PrefabCacheEntry {
+        std::filesystem::file_time_type time;
+        ge3d::Scene content;
+        bool valid{};
+        bool reported{};
+    };
+    [[nodiscard]] bool editingPrefab() const;
+    [[nodiscard]] std::vector<std::string> prefabAssetsInScene() const;
+    [[nodiscard]] const ge3d::Scene* prefabContent(const std::string& asset);
+    void refreshOverrides();
+    void syncPrefabs(bool fromLoad);
+    void createPrefab(ge3d::EntityId entity, const std::filesystem::path& folder);
+    void instantiatePrefab(const std::string& asset, std::optional<glm::vec3> position, ge3d::EntityId parent);
+    void applyPrefab(ge3d::EntityId instanceRoot);
+    void revertPrefab(ge3d::EntityId instanceRoot);
+    void unpackPrefab(ge3d::EntityId instanceRoot);
+    void openPrefab(const std::filesystem::path& path);
+    void drawPrefabBanner(ge3d::Entity& entity);
+    void createEmptyChild(ge3d::EntityId parent);
+
     // Preferencias del editor (EditorSettings.cpp), en <proyecto>/UserSettings.
     [[nodiscard]] std::filesystem::path settingsFolder() const;
     void loadSettings();
@@ -412,6 +436,10 @@ private:
     std::filesystem::path projectRename_;
     char projectRenameBuffer_[128]{};
     std::filesystem::path projectDelete_;
+
+    std::map<std::string, PrefabCacheEntry> prefabs_;
+    std::filesystem::path prefabReturn_;          // escena a la que volver después de editar un prefab
+    std::uint64_t overridesState_ = ~0ull;
     bool showInfo_ = true;
     bool showWarnings_ = true;
     bool showErrors_ = true;

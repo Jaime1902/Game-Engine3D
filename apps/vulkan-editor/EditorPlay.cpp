@@ -60,12 +60,29 @@ void EditorView::startPlaySystems() {
         else audio_->stopEmitter(id);
     };
     services.player = [this] { return physics_ && physics_->hasCharacter() ? physics_->characterEntity() : ge3d::EntityId{}; };
+    // scene.spawn / entity:destroy: cambian la copia de Play directamente (no son ediciones que deshacer).
+    services.spawn = [this](const std::string& asset, ge3d::Vec3 position) {
+        const auto* content = prefabContent(asset);
+        if (!content) return ge3d::EntityId{};
+        ge3d::Transform transform = ge3d::prefabRoot(*content)->transform;
+        transform.position = position;
+        ge3d::EntityId root{};
+        ge3d::History temporary;
+        temporary.execute(scene_, ge3d::makeInstantiateCommand(scene_, *content, asset, transform, 0, &root));
+        return root;
+    };
+    services.destroy = [this](ge3d::EntityId id) {
+        if (auto command = ge3d::makeDeleteCommand(scene_, id)) {
+            ge3d::History temporary;
+            temporary.execute(scene_, std::move(*command));
+        }
+    };
     scripts_->setServices(std::move(services));
 
     firstPerson_ = physics_->hasCharacter();
     if (firstPerson_) {
         const auto* player = scene_.find(physics_->characterEntity());
-        fpYaw_ = player ? glm::radians(player->transform.rotationDegrees.y) : 0.0f;
+        fpYaw_ = player ? glm::radians(ge3d::worldTransform(scene_, *player).rotationDegrees.y) : 0.0f;
         fpPitch_ = 0.0f;
         fpEye_ = toGlm(physics_->character().eye);
         mouseCaptured_ = true;
@@ -123,7 +140,7 @@ void EditorView::updatePlay(float dt) {
         scripts_->notify(scene_, event.self, callbackFor(event.kind), event.other, event.speed);
         if (event.kind == ge3d::PhysicsEvent::Kind::collision && event.speed > 2.5f && event.self < event.other) {
             if (const auto* entity = scene_.find(event.self)) {
-                audio_->playOneShot("sounds/golpe.wav", std::min(1.0f, event.speed / 8.0f), entity->transform.position);
+                audio_->playOneShot("sounds/golpe.wav", std::min(1.0f, event.speed / 8.0f), ge3d::worldTransform(scene_, *entity).position);
             }
         }
     }
@@ -207,7 +224,8 @@ void EditorView::drawPlayOverlay(ImDrawList* draw, ImVec2 origin, ImVec2 size) {
     };
     for (const auto& entity : scene_.entities()) {
         const bool selected = entity.id == selected_;
-        const glm::vec3 p = toGlm(entity.transform.position);
+        const auto world = ge3d::worldTransform(scene_, entity);
+        const glm::vec3 p = toGlm(world.position);
         if (entity.player) {
             const float h = entity.player->height, r = entity.player->radius;
             const ImU32 color = selected ? IM_COL32(120, 255, 140, 255) : IM_COL32(90, 200, 110, 200);
@@ -220,7 +238,7 @@ void EditorView::drawPlayOverlay(ImDrawList* draw, ImVec2 origin, ImVec2 size) {
                 if (project(p + offset, a0) && project(p + offset + glm::vec3{0, h, 0}, a1)) draw->AddLine(a0, a1, color, 1.5f);
             }
             // Hacia dónde mira al empezar.
-            const float yaw = glm::radians(entity.transform.rotationDegrees.y);
+            const float yaw = glm::radians(world.rotationDegrees.y);
             ImVec2 e0, e1;
             if (project(p + glm::vec3{0, h * 0.92f, 0}, e0) &&
                 project(p + glm::vec3{-std::sin(yaw) * 0.8f, h * 0.92f, -std::cos(yaw) * 0.8f}, e1)) {
@@ -228,7 +246,7 @@ void EditorView::drawPlayOverlay(ImDrawList* draw, ImVec2 origin, ImVec2 size) {
             }
         }
         if (entity.body && entity.body->type == ge3d::BodyType::trigger) {
-            drawPieceOutline(draw, ge3d::Primitive::box, modelMatrix(entity.transform), origin, size,
+            drawPieceOutline(draw, ge3d::Primitive::box, worldMatrix(entity), origin, size,
                              selected ? IM_COL32(255, 220, 90, 255) : IM_COL32(230, 190, 60, 170), IM_COL32(230, 190, 60, selected ? 40 : 20));
         }
         if (entity.audio) {

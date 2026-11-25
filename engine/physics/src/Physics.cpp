@@ -359,8 +359,16 @@ struct PhysicsWorld::Impl final : public JPH::ContactListener, public JPH::Chara
     void reconcile(const Scene& current, float dt) {
         auto& bi = bodyInterface();
         for (auto& [id, item] : tracked) item.seen = false;
-        for (const auto& entity : current.entities()) {
-            if (entity.player || !entity.active) continue;   // el jugador es el personaje, no un cuerpo
+        for (const auto& original : current.entities()) {
+            if (original.player || !activeInHierarchy(current, original)) continue;   // el jugador es el personaje, no un cuerpo
+            // Los cuerpos viven en el mundo: con padres, se usa la transformación combinada.
+            Entity worldCopy;
+            const bool hasParent = original.parent != 0;
+            if (hasParent) {
+                worldCopy = original;
+                worldCopy.transform = worldTransform(current, original);
+            }
+            const Entity& entity = hasParent ? worldCopy : original;
             const bool piece = entity.shape.has_value() || entity.body.has_value();
             const bool heightmap = entity.heightmap && entity.heightmap->data;
             const bool voxels = entity.terrain && entity.terrain->voxels;
@@ -434,15 +442,16 @@ struct PhysicsWorld::Impl final : public JPH::ContactListener, public JPH::Chara
     std::optional<float> waterSurface(Vec3 point) const {
         if (!scene) return std::nullopt;
         for (const auto& entity : scene->entities()) {
-            if (!entity.heightmap || !entity.heightmap->data || !entity.active) continue;
+            if (!entity.heightmap || !entity.heightmap->data || !activeInHierarchy(*scene, entity)) continue;
             const auto& map = *entity.heightmap->data;
             const float cell = entity.heightmap->settings.cellSize;
-            const Vec3 local = inverseTransformPoint(entity.transform, point);
+            const Transform world = worldTransform(*scene, entity);
+            const Vec3 local = inverseTransformPoint(world, point);
             const int x = static_cast<int>(std::lround(local.x / cell)), z = static_cast<int>(std::lround(local.z / cell));
             if (!map.contains(x, z)) continue;
             const float depth = map.water(x, z);
             if (depth < 0.02f) continue;
-            return transformPoint(entity.transform, {local.x, map.height(x, z) + depth, local.z}).y;
+            return transformPoint(world, {local.x, map.height(x, z) + depth, local.z}).y;
         }
         return std::nullopt;
     }
@@ -461,7 +470,9 @@ struct PhysicsWorld::Impl final : public JPH::ContactListener, public JPH::Chara
         }
     }
 
-    void createCharacter(const Entity& entity) {
+    void createCharacter(const Entity& original, const Scene& owner) {
+        Entity entity = original;
+        entity.transform = worldTransform(owner, original);
         player = *entity.player;
         characterOwner = entity.id;
         const float halfCylinder = std::max(0.05f, player.height * 0.5f - player.radius);
@@ -562,12 +573,19 @@ struct PhysicsWorld::Impl final : public JPH::ContactListener, public JPH::Chara
             auto* entity = current.find(entityId);
             if (!entity) continue;
             const JPH::Quat q = bi.GetRotation(id);
-            entity->transform.position = toVec(bi.GetPosition(id));
-            entity->transform.rotationDegrees = quaternionToEuler({q.GetX(), q.GetY(), q.GetZ(), q.GetW()});
-            item.transform = entity->transform;
+            // item.transform está en el mundo; la entidad guarda la transformación relativa a su padre.
+            Transform world = item.transform;
+            world.position = toVec(bi.GetPosition(id));
+            world.rotationDegrees = quaternionToEuler({q.GetX(), q.GetY(), q.GetZ(), q.GetW()});
+            entity->transform = localTransform(current, entity->parent, world);
+            item.transform = world;
         }
         if (character) {
-            if (auto* entity = current.find(characterOwner)) entity->transform.position = toVec(character->GetPosition());
+            if (auto* entity = current.find(characterOwner)) {
+                Transform world = worldTransform(current, *entity);
+                world.position = toVec(character->GetPosition());
+                entity->transform.position = localTransform(current, entity->parent, world).position;
+            }
         }
     }
 };
@@ -578,8 +596,8 @@ PhysicsWorld::~PhysicsWorld() = default;
 void PhysicsWorld::build(const Scene& scene) {
     impl_->scene = &scene;
     for (const auto& entity : scene.entities()) {
-        if (entity.player && entity.active) {
-            impl_->createCharacter(entity);
+        if (entity.player && activeInHierarchy(scene, entity)) {
+            impl_->createCharacter(entity, scene);
             break;
         }
     }

@@ -111,6 +111,8 @@ void EditorView::watchScripts(bool force) {
         }
     }
     std::sort(soundList_.begin(), soundList_.end());
+    // Prefabs guardados (desde el modo prefab o por fuera): sus copias en esta escena se actualizan.
+    syncPrefabs(false);
     // Cambios hechos fuera del editor (o con otro editor de texto): se recargan como al guardar.
     for (const auto& path : scriptList_) {
         const auto time = std::filesystem::last_write_time(scriptFile(path), error);

@@ -1,4 +1,5 @@
 // Pruebas del host de scripts Luau: parámetros, callbacks, presupuesto, sandbox, mensajes y recarga.
+#include "ge3d/Prefab.hpp"
 #include "ge3d/SceneIO.hpp"
 #include "ge3d/ScriptHost.hpp"
 
@@ -201,6 +202,54 @@ void testReload() {
     h.host.stop(scene);
 }
 
+// Crear objetos desde un script (prefab), colgarlos de otro y destruirlos.
+void testSpawnAndHierarchy() {
+    Harness h;
+    h.sources["scripts/bala.luau"] = "local S = {}\nfunction S.onStart(self) log('nace', self.entity.name) end\nreturn S\n";
+    h.sources["scripts/lanzador.luau"] = R"(
+        local S = {}
+        function S.onStart(self)
+            local b = scene.spawn("prefabs/bala.prefab.json", vector.create(3, 0, 0))
+            log("pos", b.position.x)
+            b.parent = self.entity
+            log("local", b.localPosition.x, "mundo", b.position.x)
+            local otra = scene.spawn("prefabs/bala.prefab.json")
+            otra:destroy()
+        end
+        return S
+    )";
+    ge3d::Scene prefab;
+    auto bullet = prefab.makeEntity("Bala", ge3d::Primitive::box);
+    bullet.script = ge3d::ScriptComponent{"scripts/bala.luau", true, {}};
+    prefab.add(std::move(bullet));
+
+    ge3d::Scene scene;
+    const auto launcher = addScripted(scene, "Lanzador", "scripts/lanzador.luau");
+    scene.find(launcher)->transform.position = {1, 0, 0};
+    ge3d::History history;
+    ge3d::ScriptServices services;
+    services.spawn = [&](const std::string& asset, ge3d::Vec3 position) {
+        ge3d::EntityId root{};
+        ge3d::Transform transform;
+        transform.position = position;
+        history.execute(scene, ge3d::makeInstantiateCommand(scene, prefab, asset, transform, 0, &root));
+        return root;
+    };
+    services.destroy = [&](ge3d::EntityId id) {
+        if (auto command = ge3d::makeDeleteCommand(scene, id)) history.execute(scene, *command);
+    };
+    h.host.setServices(services);
+    h.host.start(scene);
+    expect(h.errors.empty(), "crear objetos desde un script no da errores");
+    expect(h.logged("nace Bala"), "el script de lo creado arranca enseguida");
+    expect(h.logged("pos 3"), "spawn coloca el objeto");
+    expect(h.logged("local 2 mundo 3"), "cambiar de padre conserva la posicion en el mundo");
+    expect(scene.entities().size() == 2, "destroy quita el objeto creado");
+    const auto& child = scene.entities().back();
+    expect(child.parent == launcher && child.prefab && child.prefab->asset == "prefabs/bala.prefab.json", "lo creado queda como hijo e instancia");
+    h.host.stop(scene);
+}
+
 void testSerialization() {
     ge3d::Scene scene;
     addScripted(scene, "Puerta", "scripts/puerta.luau", {{"velocidad", 45.0}, {"abierta", true}, {"nombre", std::string("norte")}});
@@ -222,6 +271,7 @@ int main() {
     testBudgetAndSandbox();
     testMessagesAndErrors();
     testReload();
+    testSpawnAndHierarchy();
     testSerialization();
     if (failures > 0) {
         std::cerr << failures << " comprobaciones fallidas\n";

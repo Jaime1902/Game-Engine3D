@@ -323,6 +323,16 @@ std::string serializeScene(const Scene& scene) {
         item["uuid"] = entity.uuid.toString();
         item["name"] = entity.name;
         if (!entity.active) item["active"] = false;
+        if (entity.parent) {
+            if (const auto* parent = scene.find(entity.parent)) item["parent"] = parent->uuid.toString();
+        }
+        if (entity.prefab) {
+            Json prefab = Json::object();
+            prefab["asset"] = entity.prefab->asset;
+            prefab["source"] = entity.prefab->source.toString();
+            prefab["overrides"] = entity.prefab->overrides;
+            item["prefab"] = std::move(prefab);
+        }
         Json transform = Json::object();
         transform["position"] = vector(entity.transform.position);
         transform["rotationDegrees"] = vector(entity.transform.rotationDegrees);
@@ -421,6 +431,7 @@ Scene parseSceneData(std::string_view text, bool generateTerrains) {
 
     Scene scene;
     std::set<Uuid> seen;
+    std::vector<std::pair<EntityId, Uuid>> parents;   // se resuelven al final: el padre puede venir después
     for (std::size_t i = 0; i < entities.size(); ++i) {
         const auto& item = entities[i];
         const std::string at = "Entidad " + std::to_string(i + 1);
@@ -435,6 +446,29 @@ Scene parseSceneData(std::string_view text, bool generateTerrains) {
         if (item.contains("active")) {
             if (!item["active"].is_boolean()) fail(at + ": \"active\" debe ser true o false");
             entity.active = item["active"].get<bool>();
+        }
+        std::optional<Uuid> parentUuid;
+        if (number >= 7 && item.contains("parent")) {
+            if (!item["parent"].is_string()) fail(at + ": \"parent\" debe ser un UUID");
+            parentUuid = Uuid::parse(item["parent"].get<std::string>());
+            if (!parentUuid || parentUuid->isNil()) fail(at + ": \"parent\" no es un UUID valido");
+        }
+        if (number >= 7 && item.contains("prefab")) {
+            const auto& link = item["prefab"];
+            const std::string linkAt = at + " (prefab)";
+            if (!link.is_object()) fail(linkAt + ": debe ser un objeto");
+            PrefabLink prefab;
+            prefab.asset = readString(link, "asset", linkAt);
+            const auto source = Uuid::parse(readString(link, "source", linkAt));
+            if (!source) fail(linkAt + ": \"source\" no es un UUID valido");
+            prefab.source = *source;
+            if (link.contains("overrides")) {
+                if (!link["overrides"].is_array()) fail(linkAt + ": \"overrides\" debe ser una lista");
+                for (const auto& name : link["overrides"]) {
+                    if (name.is_string()) prefab.overrides.push_back(name.get<std::string>());
+                }
+            }
+            entity.prefab = std::move(prefab);
         }
 
         if (number <= 2) {
@@ -558,7 +592,17 @@ Scene parseSceneData(std::string_view text, bool generateTerrains) {
                 entity.heightmap = generateTerrains ? makeHeightmap(settings) : HeightmapComponent{settings, nullptr};
             }
         }
-        scene.add(std::move(entity));
+        const auto id = scene.add(std::move(entity));
+        if (parentUuid) parents.emplace_back(id, *parentUuid);
+    }
+    for (const auto& [id, parentUuid] : parents) {
+        const auto& entities = scene.entities();
+        const auto it = std::find_if(entities.begin(), entities.end(), [&](const Entity& e) { return e.uuid == parentUuid; });
+        if (it == entities.end()) fail("Escena: el padre " + parentUuid.toString() + " no existe");
+        scene.find(id)->parent = it->id;
+    }
+    for (const auto& [id, parentUuid] : parents) {
+        if (isAncestor(scene, id, id)) fail("Escena: la jerarquia tiene un ciclo (" + scene.find(id)->name + ")");
     }
     return scene;
 }

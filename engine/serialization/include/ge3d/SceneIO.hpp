@@ -19,8 +19,9 @@ namespace ge3d {
 //   5  "script" { path, enabled, params { nombre: número | booleano | texto } }: comportamiento en Luau.
 //   6  "body" { type, mass, friction, restitution }, "audio" { clip, volume, minDistance, maxDistance, loop,
 //      playOnStart, spatial } y "player" { height, radius, walkSpeed, runSpeed, jumpSpeed, mouseSensitivity }.
+//   7  "parent": UUID del padre (transformación local) y "prefab" { asset, source, overrides[] }.
 // Al leer una versión anterior se migra en memoria; al guardar siempre se escribe la actual.
-inline constexpr int sceneFormatVersion = 6;
+inline constexpr int sceneFormatVersion = 7;
 
 // El contenido no es una escena válida. La escena abierta no debe sustituirse.
 class SceneFormatError : public std::runtime_error {
