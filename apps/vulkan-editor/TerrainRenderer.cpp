@@ -368,7 +368,7 @@ void TerrainRenderer::draw(VkCommandBuffer command, VkPipelineLayout layout, con
     vkCmdBindIndexBuffer(command, quadIndices_.handle, 0, VK_INDEX_TYPE_UINT32);
     int boundPage = -1;
     for (const auto& entity : scene.entities()) {
-        if (!entity.terrain || !entity.terrain->voxels) continue;
+        if (!entity.terrain || !entity.terrain->voxels || !entity.active) continue;
         const auto found = terrains_.find(entity.id);
         if (found == terrains_.end() || found->second.grid != entity.terrain->voxels.get()) continue;
         const auto& terrain = found->second;
@@ -407,7 +407,7 @@ void TerrainRenderer::drawHeightmaps(VkCommandBuffer command, VkPipelineLayout l
     int boundPage = -1;
     constexpr float chunkCells = static_cast<float>(ge3d::Heightmap::chunkCells);
     for (const auto& entity : scene.entities()) {
-        if (!entity.heightmap || !entity.heightmap->data) continue;
+        if (!entity.heightmap || !entity.heightmap->data || !entity.active) continue;
         const auto found = heightmaps_.find(entity.id);
         if (found == heightmaps_.end() || found->second.map != entity.heightmap->data.get()) continue;
         const auto& terrain = found->second;
@@ -453,7 +453,7 @@ void TerrainRenderer::drawWater(VkCommandBuffer command, VkPipelineLayout layout
     int boundPage = -1;
     constexpr float chunkCells = static_cast<float>(ge3d::Heightmap::chunkCells);
     for (const auto& entity : scene.entities()) {
-        if (!entity.heightmap || !entity.heightmap->data) continue;
+        if (!entity.heightmap || !entity.heightmap->data || !entity.active) continue;
         const auto found = heightmaps_.find(entity.id);
         if (found == heightmaps_.end() || found->second.map != entity.heightmap->data.get()) continue;
         const auto& terrain = found->second;

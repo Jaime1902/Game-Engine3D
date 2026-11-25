@@ -32,11 +32,11 @@ El editor requiere una GPU con Vulkan 1.3, dynamic rendering y synchronization2.
 
 | Panel | Para qué sirve |
 |---|---|
-| **Jerarquía** (izquierda) | Objetos de la escena. **+** crea cajas, rampas y terrenos (de malla o de vóxeles), el buscador filtra, clic derecho para duplicar o eliminar, doble clic para enfocar |
+| **Jerarquía** (izquierda) | Objetos de la escena. **+** o clic derecho crea objetos; **Ctrl+clic** y **Shift+clic** seleccionan varios; arrastrar reordena; **F2** renombra; clic derecho: copiar, pegar, duplicar, activar/desactivar. Los inactivos se ven atenuados |
 | **Escena** (centro) | Vista pixel art (ver *Estilo pixel art*). Cubo de orientación arriba a la derecha: clic en una cara para alinear la cámara. El mundo no tiene bordes: la cuadrícula sigue a la cámara, pasa a líneas cada 10 m o 100 m al alejarse y se desvanece con tramado |
-| **Inspector** (derecha) | Nombre y componentes del objeto: Transformación, Forma (primitiva y material de cada cara), Terreno (capas, generador y tamaño) y Terreno de vóxeles. **Agregar componente** los añade; clic derecho en la cabecera de un componente lo quita |
-| **Proyecto** (abajo) | Archivos de `projects/pueblo/Content`. Doble clic en una escena para abrirla |
-| **Consola** (abajo) | Mensajes del editor, de Vulkan y de los scripts, con filtros por tipo |
+| **Inspector** (derecha) | Casilla de activo, nombre y componentes. El botón **...** (o clic derecho) de cada componente: Restablecer, Copiar valores, Pegar valores y Quitar. **Agregar componente** tiene buscador (escribe y pulsa Intro). Soltar aquí un script, sonido o material lo asigna |
+| **Proyecto** (abajo) | Carpetas a la izquierda y recursos con iconos a la derecha, más la carpeta virtual **Materiales**. Doble clic abre (escena, script, carpeta) o escucha (sonido). **Arrastra** materiales, scripts y sonidos sobre un objeto de la Escena o la Jerarquía (Shift: material solo en esa cara). Clic derecho: crear carpeta, script o escena, renombrar (actualiza las referencias de la escena), eliminar (a la papelera) y mostrar en el Explorador. Buscador en todo el proyecto |
+| **Consola** (abajo) | Mensajes del editor, de Vulkan y de los scripts, con filtros por tipo. Clic en un error de script abre la línea en Código. **Limpiar al jugar** y **Pausa en error** como en Unity |
 | **Código** (junto a Escena) | Scripts Luau de `Content/scripts`: pestañas, números de línea, errores en vivo y **Guardar** (Ctrl+S) |
 
 La barra superior tiene las herramientas **Mano (Q)**, **Mover (W)**, **Rotar (E)**, **Escalar (R)**, **Pintar (B)**, **Construir (C)** y **Terreno (T)**, el cambio de ejes Global o Local y **Ajuste**, que mueve en pasos de 0,25 y rota en pasos de 15°. En el centro están **Play**, **Pausa** y **Paso**: en Play el editor se tiñe de azul y al detener se descartan los cambios hechos durante el juego.
@@ -45,7 +45,11 @@ Con Pintar, Construir y Terreno, la barra de la vista muestra los materiales con
 
 | Acción | Atajo |
 |---|---|
-| Orbitar / desplazar / acercar | Clic derecho o Alt + clic izquierdo / botón central / rueda |
+| Mirar y volar (como en Unity) | Mantener **clic derecho** + **WASD** (Q baja, E sube, Shift x3, rueda: velocidad) |
+| Orbitar / desplazar / acercar | **Alt + clic izquierdo** / botón central / rueda |
+| Seleccionar varios | **Ctrl+clic** o **Shift+clic**; arrastrar en un hueco de la vista dibuja un rectángulo de selección |
+| Copiar / pegar / seleccionar todo / renombrar | **Ctrl+C** / **Ctrl+V** / **Ctrl+A** / **F2** |
+| Ajuste a la cuadrícula al arrastrar el gizmo | Mantener **Ctrl** |
 | Pintar (herramienta B) | Clic o arrastre: la cara bajo el cursor · Shift + clic: toda la pieza · Ctrl + clic: tomar el material (también de un vóxel) |
 | Construir (herramienta C) | Clic: una pieza en la celda · Arrastre: trazo · Shift + arrastre: rectángulo · Ctrl + arrastre: borrar piezas · Espacio: girar 90° |
 | Terreno (herramienta T) | Pinceles Elevar / Bajar / Pintar / Aplanar / Suavizar / Agua (Shift: quitar) · mantener pulsado para seguir aplicando · **[** y **]**: radio |
@@ -55,7 +59,7 @@ Con Pintar, Construir y Terreno, la barra de la vista muestra los materiales con
 | Nueva / abrir / guardar escena | **Ctrl+N** / **Ctrl+O** / **Ctrl+S** |
 | Play / pausa / paso | **Ctrl+P** / **Ctrl+Shift+P** / **Ctrl+Alt+P** |
 
-La escena se guarda en `projects/pueblo/Content/scenes/main.scene.json` y se abre sola al iniciar. Los datos de cada terreno se guardan junto a ella, en `scenes/terrains/<uuid>.heightmap.json` (malla) o `<uuid>.terrain.json` (vóxeles). El título y la Jerarquía muestran `*` cuando hay cambios sin guardar. Al cerrar, abrir otra escena o crear una nueva con cambios pendientes, el editor pregunta si guardar. Si un archivo está dañado, el editor muestra el error y conserva la escena abierta. **Ventana → Restablecer distribución** recupera los paneles cerrados.
+La escena se guarda en `projects/pueblo/Content/scenes/` y al iniciar se abre la última que usaste (**Archivo → Abrir reciente** tiene las demás). El editor recuerda la distribución de paneles, la cámara de cada escena, el estilo y las opciones en `projects/pueblo/UserSettings/` (por usuario, fuera del repositorio). Los datos de cada terreno se guardan junto a ella, en `scenes/terrains/<uuid>.heightmap.json` (malla) o `<uuid>.terrain.json` (vóxeles). El título y la Jerarquía muestran `*` cuando hay cambios sin guardar. Al cerrar, abrir otra escena o crear una nueva con cambios pendientes, el editor pregunta si guardar. Si un archivo está dañado, el editor muestra el error y conserva la escena abierta. **Ventana → Restablecer distribución** recupera los paneles cerrados.
 
 ### Materiales y texturas
 

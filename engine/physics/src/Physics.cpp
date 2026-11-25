@@ -360,7 +360,7 @@ struct PhysicsWorld::Impl final : public JPH::ContactListener, public JPH::Chara
         auto& bi = bodyInterface();
         for (auto& [id, item] : tracked) item.seen = false;
         for (const auto& entity : current.entities()) {
-            if (entity.player) continue;   // el jugador es el personaje, no un cuerpo
+            if (entity.player || !entity.active) continue;   // el jugador es el personaje, no un cuerpo
             const bool piece = entity.shape.has_value() || entity.body.has_value();
             const bool heightmap = entity.heightmap && entity.heightmap->data;
             const bool voxels = entity.terrain && entity.terrain->voxels;
@@ -434,7 +434,7 @@ struct PhysicsWorld::Impl final : public JPH::ContactListener, public JPH::Chara
     std::optional<float> waterSurface(Vec3 point) const {
         if (!scene) return std::nullopt;
         for (const auto& entity : scene->entities()) {
-            if (!entity.heightmap || !entity.heightmap->data) continue;
+            if (!entity.heightmap || !entity.heightmap->data || !entity.active) continue;
             const auto& map = *entity.heightmap->data;
             const float cell = entity.heightmap->settings.cellSize;
             const Vec3 local = inverseTransformPoint(entity.transform, point);
@@ -578,7 +578,7 @@ PhysicsWorld::~PhysicsWorld() = default;
 void PhysicsWorld::build(const Scene& scene) {
     impl_->scene = &scene;
     for (const auto& entity : scene.entities()) {
-        if (entity.player) {
+        if (entity.player && entity.active) {
             impl_->createCharacter(entity);
             break;
         }

@@ -165,7 +165,7 @@ void AudioSystem::update(const Scene& scene, const Listener& listener) {
 
     for (auto& [id, emitter] : impl.emitters) emitter.seen = false;
     for (const auto& entity : scene.entities()) {
-        if (!entity.audio || entity.audio->clip.empty()) continue;
+        if (!entity.audio || entity.audio->clip.empty() || !entity.active) continue;
         auto [it, created] = impl.emitters.try_emplace(entity.id);
         auto& emitter = it->second;
         emitter.seen = true;

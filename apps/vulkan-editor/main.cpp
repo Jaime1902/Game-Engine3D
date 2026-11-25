@@ -1215,7 +1215,7 @@ void run(const std::filesystem::path& initialScene) {
             vkCmdBindIndexBuffer(command, indices.handle, 0, VK_INDEX_TYPE_UINT32);
             vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, cubePipeline);
             for (const auto& entity : editor.scene().entities()) {
-                if (!entity.shape) continue;
+                if (!entity.shape || !entity.active) continue;
                 ScenePush push;
                 push.model = EditorView::modelMatrix(entity.transform);
                 push.grid.w = modePiece;

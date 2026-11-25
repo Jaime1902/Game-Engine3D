@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <array>
 #include <map>
 #include <memory>
 #include <optional>
@@ -243,8 +244,20 @@ private:
     void undo();
     void redo();
     void validateSelection();
+    // Selección múltiple como en Unity. selected_ es el objeto activo (el que muestra el Inspector).
+    enum class SelectMode { replace, toggle, add, range };
+    [[nodiscard]] bool isSelected(ge3d::EntityId id) const;
+    void select(ge3d::EntityId id, SelectMode mode = SelectMode::replace);
+    void clearSelection();
+    void selectAll();
+    void copySelection();
+    void pasteClipboard();
+    void setActive(bool active);
+    void flyCamera();
+    void drawSelectionOutline(ImDrawList* draw, ImVec2 origin, ImVec2 size);
+    void applyComponentAction(ge3d::Entity& entity, const ge3d::Entity& frameStart, int kind, int action);
     [[nodiscard]] bool editInProgress() const {
-        return gizmoEdit_.has_value() || inspectorEdit_.has_value() || !paintStroke_.empty() || building_ || erasing_ ||
+        return !gizmoEdit_.empty() || inspectorEdit_.has_value() || !paintStroke_.empty() || building_ || erasing_ ||
                sculpting_;
     }
 
@@ -256,6 +269,19 @@ private:
     void loadScene();
     void refreshProject();
     void drawProjectNode(const ProjectNode& node, bool root);
+    [[nodiscard]] const ProjectNode* findProjectNode(const ProjectNode& node, const std::filesystem::path& path) const;
+    [[nodiscard]] std::string assetPath(const std::filesystem::path& path) const;
+    // Arrastrar un recurso del Proyecto sobre un objeto: material (a toda la pieza o, con face, a esa cara),
+    // script (componente Script) o sonido (Fuente de audio).
+    void applyAsset(const std::string& asset, ge3d::EntityId entity, std::optional<std::uint32_t> face);
+
+    // Preferencias del editor (EditorSettings.cpp), en <proyecto>/UserSettings.
+    [[nodiscard]] std::filesystem::path settingsFolder() const;
+    void loadSettings();
+    void saveSettings();
+    void addRecentScene(const std::filesystem::path& path);
+    void rememberCamera();
+    void restoreCamera();
 
     // Modo Play: se juega sobre una copia de la escena que se descarta al detener.
     void togglePlay();
@@ -290,7 +316,7 @@ private:
     bool openShortcutsPopup_ = false;
 
     // Estado previo de la entidad al empezar un arrastre del gizmo o del Inspector.
-    std::optional<ge3d::Entity> gizmoEdit_;
+    std::vector<ge3d::Entity> gizmoEdit_;          // todo lo que mueve el gizmo (selección múltiple)
     std::optional<ge3d::Entity> inspectorEdit_;
     // Trazo de pintura en curso: estado previo de cada pieza tocada. Se guarda como una sola operación.
     std::map<ge3d::EntityId, ge3d::Entity> paintStroke_;
@@ -367,6 +393,25 @@ private:
     double lastScriptWatch_ = -10.0;
     ImFont* codeFont_ = nullptr;
     char newScriptName_[64]{};
+
+    // Preferencias recordadas entre sesiones.
+    std::string iniPath_;
+    std::filesystem::path lastScene_;
+    std::vector<std::filesystem::path> recentScenes_;
+    std::map<std::string, std::array<float, 6>> cameras_;   // escena -> pivote, yaw, pitch, distancia
+    bool clearOnPlay_ = false;
+    bool pauseOnError_ = false;
+    int lastErrorCount_ = 0;
+
+    // Panel Proyecto en dos columnas.
+    std::filesystem::path projectFolder_;
+    bool projectMaterials_ = false;               // carpeta virtual con el catálogo de materiales
+    char projectFilter_[64]{};
+    float projectTile_ = 64.0f;
+    std::string projectSelected_;
+    std::filesystem::path projectRename_;
+    char projectRenameBuffer_[128]{};
+    std::filesystem::path projectDelete_;
     bool showInfo_ = true;
     bool showWarnings_ = true;
     bool showErrors_ = true;
@@ -379,6 +424,20 @@ private:
     float aspect_ = 320.0f / 180.0f;
 
     ge3d::EntityId selected_{};
+    std::vector<ge3d::EntityId> selection_;
+    ge3d::EntityId rangeAnchor_{};
+    std::vector<ge3d::Entity> clipboard_;
+    ge3d::EntityId renaming_{};                   // entidad que se renombra en la Jerarquía (F2)
+    bool startRename_ = false;
+    char renameBuffer_[128]{};
+    bool marquee_ = false;                        // rectángulo de selección en la vista
+    ImVec2 marqueeStart_{};
+    bool flying_ = false;                         // clic derecho: mirar y volar con WASD
+    float flySpeed_ = 8.0f;
+    double flySpeedShown_ = -10.0;
+    int componentClipboardKind_ = 0;              // Copiar / Pegar valores de un componente
+    ge3d::Entity componentClipboard_{};
+    char addComponentFilter_[64]{};
     glm::vec3 pivot_{0.0f, 0.35f, 0.0f};
     float yaw_ = 0.75f;
     float pitch_ = 0.48f;

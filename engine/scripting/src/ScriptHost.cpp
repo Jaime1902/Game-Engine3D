@@ -613,7 +613,7 @@ void ScriptHost::start(Scene& scene) {
     // Se copian los ids primero: onStart puede cambiar la escena.
     std::vector<EntityId> ids;
     for (const auto& entity : scene.entities()) {
-        if (entity.script && entity.script->enabled && !entity.script->path.empty()) ids.push_back(entity.id);
+        if (entity.active && entity.script && entity.script->enabled && !entity.script->path.empty()) ids.push_back(entity.id);
     }
     for (const auto id : ids) {
         if (const auto* entity = scene.find(id)) impl.createInstance(*entity);

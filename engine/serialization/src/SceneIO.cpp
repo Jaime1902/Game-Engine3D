@@ -322,6 +322,7 @@ std::string serializeScene(const Scene& scene) {
         Json item = Json::object();
         item["uuid"] = entity.uuid.toString();
         item["name"] = entity.name;
+        if (!entity.active) item["active"] = false;
         Json transform = Json::object();
         transform["position"] = vector(entity.transform.position);
         transform["rotationDegrees"] = vector(entity.transform.rotationDegrees);
@@ -431,6 +432,10 @@ Scene parseSceneData(std::string_view text, bool generateTerrains) {
         if (!seen.insert(*uuid).second) fail(at + ": UUID repetido " + uuid->toString());
         entity.uuid = *uuid;
         entity.name = readString(item, "name", at);
+        if (item.contains("active")) {
+            if (!item["active"].is_boolean()) fail(at + ": \"active\" debe ser true o false");
+            entity.active = item["active"].get<bool>();
+        }
 
         if (number <= 2) {
             // v1 y v2: pieza con transformación plana y colores de paleta (v2) o colores por defecto (v1).

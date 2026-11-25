@@ -135,6 +135,8 @@ struct Entity {
     EntityId id{};
     Uuid uuid{};
     std::string name;
+    // Inactiva: se queda en la escena pero no se dibuja, no choca, no suena y sus scripts no corren.
+    bool active{true};
     Transform transform{};
     std::optional<ShapeComponent> shape;
     std::optional<TerrainComponent> terrain;

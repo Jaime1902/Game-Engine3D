@@ -480,6 +480,53 @@ void testWater() {
     expect(std::abs(parsed->water(100, 32) - map->water(100, 32)) < 1.0f / 64.0f, "el agua se guarda y se recupera");
 }
 
+// Selección múltiple: borrar, duplicar, pegar y reordenar son un solo paso de deshacer.
+void testMultiCommands() {
+    auto scene = ge3d::makeStarterScene();
+    ge3d::History history;
+    const auto ids = std::vector<ge3d::EntityId>{scene.entities()[0].id, scene.entities()[2].id};
+    const auto names = std::vector<std::string>{scene.entities()[0].name, scene.entities()[1].name, scene.entities()[2].name};
+    history.execute(scene, *ge3d::makeDeleteCommand(scene, ids));
+    expect(scene.entities().size() == 1 && scene.entities()[0].name == names[1], "borrar varias entidades a la vez");
+    history.undo(scene);
+    expect(scene.entities().size() == 3 && scene.entities()[0].name == names[0] && scene.entities()[2].name == names[2],
+           "deshacer el borrado multiple devuelve cada entidad a su sitio");
+
+    std::vector<ge3d::EntityId> created;
+    history.execute(scene, *ge3d::makeDuplicateCommand(scene, ids, {0, 0, 0}, &created));
+    expect(scene.entities().size() == 5 && created.size() == 2 && scene.find(created[0]) && scene.find(created[1]),
+           "duplicar varias entidades");
+    history.undo(scene);
+    expect(scene.entities().size() == 3, "deshacer el duplicado multiple");
+
+    const std::vector<ge3d::Entity> clipboard{scene.entities()[1]};
+    created.clear();
+    history.execute(scene, ge3d::makePasteCommand(scene, clipboard, &created));
+    expect(scene.entities().size() == 4 && scene.find(created[0])->uuid != clipboard[0].uuid &&
+               scene.find(created[0])->name == clipboard[0].name,
+           "pegar crea una copia con identidad nueva");
+
+    const auto last = scene.entities().back().id;
+    history.execute(scene, *ge3d::makeMoveCommand(scene, last, 0));
+    expect(scene.entities().front().id == last, "reordenar mueve la entidad en la lista");
+    history.undo(scene);
+    expect(scene.entities().back().id == last, "deshacer el reordenado");
+
+    auto before = std::vector<ge3d::Entity>{scene.entities()[0], scene.entities()[1]};
+    scene.find(before[0].id)->transform.position.x += 3;
+    scene.find(before[1].id)->active = false;
+    history.record(*ge3d::makeModifyCommand(scene, before, "Mover dos"));
+    history.undo(scene);
+    expect(scene.find(before[0].id)->transform.position.x == before[0].transform.position.x && scene.find(before[1].id)->active,
+           "modificar varias entidades se deshace de una vez");
+
+    ge3d::Scene saved;
+    auto hidden = saved.makeEntity("Oculta", ge3d::Primitive::box);
+    hidden.active = false;
+    saved.add(std::move(hidden));
+    expect(!ge3d::parseScene(ge3d::serializeScene(saved)).entities().front().active, "una entidad inactiva se guarda asi");
+}
+
 void testFiles() {
     namespace fs = std::filesystem;
     const auto folder = fs::temp_directory_path() / ("ge3d_tests_" + ge3d::Uuid::generate().toString());
@@ -543,6 +590,7 @@ int main() {
     testStarterGeometry();
     testUuid();
     testHistory();
+    testMultiCommands();
     testSerialization();
     testVoxels();
     testTerrainHistory();

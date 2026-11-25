@@ -5,6 +5,7 @@
 #include "ge3d/SceneIO.hpp"
 #include <ImGuizmo.h>
 #include <imgui_internal.h>
+#include "EditorSystem.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
@@ -131,7 +132,7 @@ ImFont* loadFonts(float scale, ImFont*& bold, ImFont*& code) {
 }
 
 // --- Iconos dibujados con primitivas (la fuente no trae iconos) -------------------------------
-enum class Icon { hand, move, rotate, scale, paint, build, terrain, play, pause, step, cube, ramp, folder, file, scene, empty };
+enum class Icon { hand, move, rotate, scale, paint, build, terrain, play, pause, step, cube, ramp, folder, file, scene, empty, script, sound };
 
 void drawIcon(ImDrawList* draw, Icon icon, ImVec2 center, float r, ImU32 color) {
     const float t = std::max(1.0f, r * 0.17f);
@@ -217,6 +218,24 @@ void drawIcon(ImDrawList* draw, Icon icon, ImVec2 center, float r, ImU32 color) 
         draw->AddRectFilled(p(-0.9f, -0.62f), p(-0.1f, -0.25f), color, r * 0.1f);
         draw->AddRectFilled(p(-0.9f, -0.4f), p(0.9f, 0.72f), color, r * 0.12f);
         break;
+    case Icon::script: {
+        // Llaves de código.
+        draw->AddBezierCubic(p(-0.25f, -0.85f), p(-0.6f, -0.85f), p(-0.35f, 0.0f), p(-0.75f, 0.0f), color, t);
+        draw->AddBezierCubic(p(-0.75f, 0.0f), p(-0.35f, 0.0f), p(-0.6f, 0.85f), p(-0.25f, 0.85f), color, t);
+        draw->AddBezierCubic(p(0.25f, -0.85f), p(0.6f, -0.85f), p(0.35f, 0.0f), p(0.75f, 0.0f), color, t);
+        draw->AddBezierCubic(p(0.75f, 0.0f), p(0.35f, 0.0f), p(0.6f, 0.85f), p(0.25f, 0.85f), color, t);
+        break;
+    }
+    case Icon::sound: {
+        // Altavoz con ondas.
+        const ImVec2 body[] = {p(-0.85f, -0.3f), p(-0.45f, -0.3f), p(0.05f, -0.75f), p(0.05f, 0.75f), p(-0.45f, 0.3f), p(-0.85f, 0.3f)};
+        draw->AddConvexPolyFilled(body, 6, color);
+        draw->PathArcTo(p(0.05f, 0.0f), r * 0.45f, -0.9f, 0.9f, 10);
+        draw->PathStroke(color, 0, t);
+        draw->PathArcTo(p(0.05f, 0.0f), r * 0.8f, -0.9f, 0.9f, 12);
+        draw->PathStroke(color, 0, t);
+        break;
+    }
     case Icon::file: {
         const ImVec2 outline[] = {p(-0.62f, -0.88f), p(0.25f, -0.88f), p(0.62f, -0.5f), p(0.62f, 0.88f), p(-0.62f, 0.88f)};
         draw->AddPolyline(outline, 5, color, ImDrawFlags_Closed, t);
@@ -360,12 +379,6 @@ std::string sceneName(const std::filesystem::path& path) {
     return name;
 }
 
-bool isSceneFile(const std::filesystem::path& path) {
-    const auto name = ge3d::pathToUtf8(path.filename());
-    const std::string suffix = ".scene.json";
-    return name.size() > suffix.size() && name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0;
-}
-
 }
 
 // =============================================================================================
@@ -374,8 +387,14 @@ EditorView::EditorView(float uiScale, std::filesystem::path initialScene) : scal
     applyTheme(scale_);
     loadFonts(scale_, boldFont_, codeFont_);
 
-    scenePath_ = initialScene.empty() ? ge3d::pathFromUtf8(GE3D_DEFAULT_SCENE) : std::move(initialScene);
     contentRoot_ = ge3d::pathFromUtf8(GE3D_CONTENT_DIR);
+    projectFolder_ = contentRoot_;
+    loadSettings();
+    // Escena inicial: la indicada al abrir el editor, si no la última que se usó, si no la de ejemplo.
+    std::error_code lastError;
+    if (!initialScene.empty()) scenePath_ = std::move(initialScene);
+    else if (!lastScene_.empty() && std::filesystem::exists(lastScene_, lastError)) scenePath_ = lastScene_;
+    else scenePath_ = ge3d::pathFromUtf8(GE3D_DEFAULT_SCENE);
     // Scripts: se leen de Content y escriben en la Consola. La VM solo existe durante Play.
     scripts_ = std::make_unique<ge3d::ScriptHost>(
         [this](const std::string& path) { return readScript(path); },
@@ -394,6 +413,11 @@ EditorView::EditorView(float uiScale, std::filesystem::path initialScene) : scal
 
 EditorView::~EditorView() {
     if (scripts_ && scripts_->running()) scripts_->stop(scene_);
+    if (isPlaying()) scene_ = *playSnapshot_;   // la cámara y las preferencias son las de edición
+    saveSettings();
+    // La distribución se guarda ahora: después iniPath_ deja de existir.
+    if (!iniPath_.empty()) ImGui::SaveIniSettingsToDisk(iniPath_.c_str());
+    ImGui::GetIO().IniFilename = nullptr;
 }
 
 std::string EditorView::windowTitle() const {
@@ -1329,10 +1353,17 @@ std::optional<EditorView::Hit> EditorView::raycast(ImVec2 mouse, ImVec2 origin, 
 }
 
 void EditorView::pick(ImVec2 mouse, ImVec2 origin, ImVec2 size) {
+    const auto& io = ImGui::GetIO();
     const auto hit = raycast(mouse, origin, size);
-    selected_ = hit ? hit->entity : 0;
+    const SelectMode mode = io.KeyCtrl ? SelectMode::toggle : io.KeyShift ? SelectMode::add : SelectMode::replace;
+    if (hit) {
+        select(hit->entity, mode);
+    } else {
+        // Clic en el vacío: empieza un rectángulo de selección (si no se arrastra, deselecciona).
+        marquee_ = true;
+        marqueeStart_ = mouse;
+    }
 }
-
 void EditorView::drawPieceOutline(ImDrawList* draw, ge3d::Primitive primitive, const glm::mat4& model, ImVec2 origin,
                                   ImVec2 size, ImU32 lineColor, ImU32 fillColor, int face) const {
     const auto matrix = projection() * view() * model;
@@ -1562,7 +1593,103 @@ void EditorView::focusSelection() {
 // --- Edición -----------------------------------------------------------------------------------
 
 void EditorView::validateSelection() {
-    if (!scene_.find(selected_)) selected_ = 0;
+    // Lo que ya no existe sale de la selección. Asignar selected_ directamente equivale a seleccionar
+    // solo ese objeto (así el código que crea objetos no necesita conocer la selección múltiple).
+    std::erase_if(selection_, [&](ge3d::EntityId id) { return !scene_.find(id); });
+    if (selected_ && !scene_.find(selected_)) selected_ = 0;
+    if (selected_ && !isSelected(selected_)) selection_ = {selected_};
+    if (!selected_ && !selection_.empty()) selected_ = selection_.back();
+    if (!selected_) selection_.clear();
+}
+
+bool EditorView::isSelected(ge3d::EntityId id) const {
+    return std::find(selection_.begin(), selection_.end(), id) != selection_.end();
+}
+
+void EditorView::select(ge3d::EntityId id, SelectMode mode) {
+    if (!scene_.find(id)) {
+        if (mode == SelectMode::replace) clearSelection();
+        return;
+    }
+    switch (mode) {
+    case SelectMode::replace:
+        selection_ = {id};
+        selected_ = id;
+        rangeAnchor_ = id;
+        break;
+    case SelectMode::add:
+        if (!isSelected(id)) selection_.push_back(id);
+        selected_ = id;
+        rangeAnchor_ = id;
+        break;
+    case SelectMode::toggle:
+        if (isSelected(id)) {
+            std::erase(selection_, id);
+            selected_ = selection_.empty() ? 0 : selection_.back();
+        } else {
+            selection_.push_back(id);
+            selected_ = id;
+        }
+        rangeAnchor_ = id;
+        break;
+    case SelectMode::range: {
+        // Desde el ancla hasta este objeto, en el orden de la Jerarquía (solo lo que pasa el filtro).
+        const auto anchor = scene_.indexOf(rangeAnchor_ ? rangeAnchor_ : id);
+        const auto target = scene_.indexOf(id);
+        if (!anchor || !target) return select(id, SelectMode::replace);
+        selection_.clear();
+        for (auto i = std::min(*anchor, *target); i <= std::max(*anchor, *target); ++i) {
+            const auto& entity = scene_.entities()[i];
+            if (contains(entity.name, hierarchyFilter_)) selection_.push_back(entity.id);
+        }
+        selected_ = id;
+        break;
+    }
+    }
+}
+
+void EditorView::clearSelection() {
+    selection_.clear();
+    selected_ = 0;
+}
+
+void EditorView::selectAll() {
+    selection_.clear();
+    for (const auto& entity : scene_.entities()) selection_.push_back(entity.id);
+    if (!selection_.empty() && !isSelected(selected_)) selected_ = selection_.back();
+}
+
+void EditorView::copySelection() {
+    if (selection_.empty()) return;
+    clipboard_.clear();
+    // En el orden de la escena y con sus propios datos de terreno (lo que se edite después no cambia la copia).
+    for (const auto& entity : scene_.entities()) {
+        if (!isSelected(entity.id)) continue;
+        auto copy = entity;
+        if (copy.terrain && copy.terrain->voxels) copy.terrain->voxels = std::make_shared<ge3d::VoxelGrid>(*copy.terrain->voxels);
+        if (copy.heightmap && copy.heightmap->data) copy.heightmap->data = std::make_shared<ge3d::Heightmap>(*copy.heightmap->data);
+        clipboard_.push_back(std::move(copy));
+    }
+    log(std::to_string(clipboard_.size()) + (clipboard_.size() == 1 ? " objeto copiado" : " objetos copiados"));
+}
+
+void EditorView::pasteClipboard() {
+    if (clipboard_.empty() || editInProgress()) return;
+    std::vector<ge3d::EntityId> created;
+    execute(ge3d::makePasteCommand(scene_, clipboard_, &created));
+    selection_ = created;
+    selected_ = created.empty() ? 0 : created.back();
+}
+
+void EditorView::setActive(bool active) {
+    std::vector<ge3d::Entity> before;
+    for (const auto id : selection_) {
+        if (auto* entity = scene_.find(id); entity && entity->active != active) {
+            before.push_back(*entity);
+            entity->active = active;
+        }
+    }
+    if (auto command = ge3d::makeModifyCommand(scene_, before, active ? "Activar" : "Desactivar")) activeHistory().record(std::move(*command));
 }
 
 void EditorView::execute(ge3d::EditCommand command) {
@@ -1595,21 +1722,20 @@ void EditorView::createPrimitive(ge3d::Primitive primitive) {
 
 void EditorView::duplicateSelection() {
     if (editInProgress()) return;
-    if (auto command = ge3d::makeDuplicateCommand(scene_, selected_, {1, 0, 0})) {
-        const auto id = command->changes.front().after->id;
+    std::vector<ge3d::EntityId> created;
+    if (auto command = ge3d::makeDuplicateCommand(scene_, selection_, {1, 0, 0}, &created)) {
         execute(std::move(*command));
-        selected_ = id;
+        selection_ = created;
+        selected_ = created.empty() ? 0 : created.back();
     }
 }
-
 void EditorView::deleteSelection() {
     if (editInProgress()) return;
-    if (auto command = ge3d::makeDeleteCommand(scene_, selected_)) {
+    if (auto command = ge3d::makeDeleteCommand(scene_, selection_)) {
         execute(std::move(*command));
-        selected_ = 0;
+        clearSelection();
     }
 }
-
 void EditorView::undo() {
     if (editInProgress()) return;
     auto& history = activeHistory();
@@ -1654,6 +1780,8 @@ void EditorView::togglePlay() {
         for (const auto& entity : scene_.entities()) {
             if (entity.heightmap && entity.heightmap->data) waterSimulation(entity.id).wakeAll(*entity.heightmap->data);
         }
+        if (clearOnPlay_) editorLog().clear();
+        lastErrorCount_ = editorLog().counts()[2];
         log("Play: los cambios que hagas ahora se descartan al detener");
         // Física, audio y jugador; después los scripts (que ya pueden usar la física y el sonido).
         startPlaySystems();
@@ -1669,7 +1797,7 @@ void EditorView::togglePlay() {
         water_.clear();
         playHistory_.clear();
         paused_ = false;
-        gizmoEdit_.reset();
+        gizmoEdit_.clear();
         inspectorEdit_.reset();
         validateSelection();
         log("Detenido: se recupera la escena de edicion");
@@ -1712,6 +1840,7 @@ void EditorView::performSceneChange() {
     case SceneChange::none: break;
     case SceneChange::newScene: newScene(); break;
     case SceneChange::open:
+        rememberCamera();
         scenePath_ = pendingPath_;
         loadScene();
         break;
@@ -1727,7 +1856,7 @@ void EditorView::newScene() {
     history_.clear();
     savedState_ = notSaved;
     selected_ = 0;
-    gizmoEdit_.reset();
+    gizmoEdit_.clear();
     inspectorEdit_.reset();
     log("Escena nueva");
 }
@@ -1741,6 +1870,8 @@ bool EditorView::saveScene() {
     try {
         ge3d::saveSceneFile(scene_, scenePath_);
         savedState_ = history_.state();
+        addRecentScene(scenePath_);
+        saveSettings();
         log("Guardado " + ge3d::pathToUtf8(scenePath_));
         refreshProject();
         return true;
@@ -1757,9 +1888,12 @@ void EditorView::loadScene() {
         scene_ = std::move(loaded);
         history_.clear();
         savedState_ = history_.state();
-        selected_ = 0;
-        gizmoEdit_.reset();
+        clearSelection();
+        gizmoEdit_.clear();
         inspectorEdit_.reset();
+        restoreCamera();
+        addRecentScene(scenePath_);
+        saveSettings();
         log("Abierto " + ge3d::pathToUtf8(scenePath_));
     } catch (const std::exception& error) {
         log(std::string("No se pudo abrir la escena (se conserva la actual): ") + error.what(), true);
@@ -1804,11 +1938,18 @@ void EditorView::handleShortcuts() {
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_N, once)) requestSceneChange(SceneChange::newScene);
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_O, once)) pathPopup_ = PathPopup::open;
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_D, once)) duplicateSelection();
+    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_C, once)) copySelection();
+    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_V, once)) pasteClipboard();
+    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_A, once)) selectAll();
+    if (ImGui::Shortcut(ImGuiKey_F2, once) && selected_) {
+        renaming_ = selected_;
+        startRename_ = true;
+    }
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_P, once)) togglePlay();
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_P, once)) togglePause();
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiMod_Alt | ImGuiKey_P, once)) step();
     if (ImGui::Shortcut(ImGuiKey_Delete, once)) deleteSelection();
-    if (!orbiting_ && !panning_ && !(isPlaying() && !paused_)) {
+    if (!orbiting_ && !panning_ && !flying_ && !(isPlaying() && !paused_)) {
         if (ImGui::Shortcut(ImGuiKey_Q, once)) tool_ = Tool::hand;
         if (ImGui::Shortcut(ImGuiKey_W, once)) tool_ = Tool::move;
         if (ImGui::Shortcut(ImGuiKey_E, once)) tool_ = Tool::rotate;
@@ -1830,6 +1971,18 @@ void EditorView::drawMenuBar() {
     if (ImGui::BeginMenu("Archivo")) {
         if (ImGui::MenuItem("Nueva escena", "Ctrl+N")) requestSceneChange(SceneChange::newScene);
         if (ImGui::MenuItem("Abrir escena...", "Ctrl+O")) pathPopup_ = PathPopup::open;
+        if (ImGui::BeginMenu("Abrir reciente", !recentScenes_.empty())) {
+            for (const auto& path : recentScenes_) {
+                std::error_code error;
+                if (ImGui::MenuItem(ge3d::pathToUtf8(path.filename()).c_str(), nullptr, false, std::filesystem::exists(path, error))) {
+                    requestSceneChange(SceneChange::open, path);
+                }
+                ImGui::SetItemTooltip("%s", ge3d::pathToUtf8(path).c_str());
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Vaciar lista")) recentScenes_.clear();
+            ImGui::EndMenu();
+        }
         if (ImGui::MenuItem("Recargar desde disco")) requestSceneChange(SceneChange::reload);
         ImGui::Separator();
         if (ImGui::MenuItem("Guardar", "Ctrl+S", false, !isPlaying())) saveScene();
@@ -1848,6 +2001,14 @@ void EditorView::drawMenuBar() {
         if (ImGui::MenuItem(redoText.c_str(), "Ctrl+Y", false, history.canRedo())) redo();
         ImGui::Separator();
         const bool hasSelection = scene_.find(selected_) != nullptr;
+        if (ImGui::MenuItem("Copiar", "Ctrl+C", false, hasSelection)) copySelection();
+        if (ImGui::MenuItem("Pegar", "Ctrl+V", false, !clipboard_.empty())) pasteClipboard();
+        if (ImGui::MenuItem("Seleccionar todo", "Ctrl+A")) selectAll();
+        if (ImGui::MenuItem("Renombrar", "F2", false, hasSelection)) {
+            renaming_ = selected_;
+            startRename_ = true;
+        }
+        ImGui::Separator();
         if (ImGui::MenuItem("Duplicar", "Ctrl+D", false, hasSelection)) duplicateSelection();
         if (ImGui::MenuItem("Eliminar", "Supr", false, hasSelection)) deleteSelection();
         if (ImGui::MenuItem("Enfocar seleccion", "F", false, hasSelection)) focusSelection();
@@ -2087,20 +2248,26 @@ void EditorView::drawShortcutsPopup() {
 
 void EditorView::drawHierarchy() {
     if (!showHierarchy_) return;
-    enum class Action { none, duplicate, remove };
+    enum class Action { none, duplicate, remove, copy, paste, activate, deactivate };
     Action action = Action::none;
+    ge3d::EntityId moveId{};
+    std::size_t moveTo{};
+    const auto createMenu = [&] {
+        if (ImGui::MenuItem("Caja")) createPrimitive(ge3d::Primitive::box);
+        if (ImGui::MenuItem("Rampa")) createPrimitive(ge3d::Primitive::ramp);
+        ImGui::Separator();
+        if (ImGui::MenuItem("Terreno")) createHeightmap();
+        if (ImGui::MenuItem("Terreno de voxeles")) createTerrain();
+        ImGui::Separator();
+        if (ImGui::MenuItem("Jugador")) createSpecial(Special::player);
+        if (ImGui::MenuItem("Zona (trigger)")) createSpecial(Special::zone);
+        if (ImGui::MenuItem("Fuente de sonido")) createSpecial(Special::sound);
+    };
     if (ImGui::Begin("Jerarquia", &showHierarchy_)) {
         if (ImGui::Button("+")) ImGui::OpenPopup("crear_objeto");
         ImGui::SetItemTooltip("Crear objeto");
         if (ImGui::BeginPopup("crear_objeto")) {
-            if (ImGui::MenuItem("Caja")) createPrimitive(ge3d::Primitive::box);
-            if (ImGui::MenuItem("Rampa")) createPrimitive(ge3d::Primitive::ramp);
-            if (ImGui::MenuItem("Terreno")) createHeightmap();
-            if (ImGui::MenuItem("Terreno de voxeles")) createTerrain();
-            ImGui::Separator();
-            if (ImGui::MenuItem("Jugador")) createSpecial(Special::player);
-            if (ImGui::MenuItem("Zona (trigger)")) createSpecial(Special::zone);
-            if (ImGui::MenuItem("Fuente de sonido")) createSpecial(Special::sound);
+            createMenu();
             ImGui::EndPopup();
         }
         ImGui::SameLine();
@@ -2115,21 +2282,79 @@ void EditorView::drawHierarchy() {
                                            ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth);
             if (boldFont_) ImGui::PopFont();
             if (rootOpen) {
-                for (const auto& entity : scene_.entities()) {
+                const auto& entities = scene_.entities();
+                for (std::size_t index = 0; index < entities.size(); ++index) {
+                    const auto& entity = entities[index];
                     if (!contains(entity.name, hierarchyFilter_)) continue;
+                    ImGui::PushID(static_cast<int>(entity.id));
+                    if (renaming_ == entity.id) {
+                        // Renombrar en el sitio (F2 o menú): Intro confirma, Esc cancela.
+                        if (startRename_) {
+                            copyText(renameBuffer_, sizeof renameBuffer_, entity.name);
+                            ImGui::SetKeyboardFocusHere();
+                            startRename_ = false;
+                        }
+                        ImGui::SetNextItemWidth(-1);
+                        const bool done = ImGui::InputText("##renombrar", renameBuffer_, sizeof renameBuffer_,
+                                                           ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
+                        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                            renaming_ = 0;
+                        } else if (done || ImGui::IsItemDeactivated()) {
+                            if (auto* target = scene_.find(entity.id); target && target->name != renameBuffer_ && renameBuffer_[0]) {
+                                std::optional<ge3d::Entity> before = *target;
+                                target->name = renameBuffer_;
+                                commitModification(before, "Renombrar");
+                            }
+                            renaming_ = 0;
+                        }
+                        ImGui::PopID();
+                        continue;
+                    }
                     ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen |
                                                ImGuiTreeNodeFlags_SpanAvailWidth;
-                    if (selected_ == entity.id) flags |= ImGuiTreeNodeFlags_Selected;
+                    if (isSelected(entity.id)) flags |= ImGuiTreeNodeFlags_Selected;
+                    // Los objetos inactivos se ven atenuados, como en Unity.
+                    if (!entity.active) ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
                     treeItem(reinterpret_cast<const void*>(static_cast<std::uintptr_t>(entity.id)), displayName(entity),
-                             entityIcon(entity), ImGui::GetColorU32(gray(0.75f)), flags);
-                    if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) selected_ = entity.id;
+                             entityIcon(entity), ImGui::GetColorU32(gray(entity.active ? 0.75f : 0.45f)), flags);
+                    if (!entity.active) ImGui::PopStyleColor();
+                    if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
+                        const auto& io = ImGui::GetIO();
+                        select(entity.id, io.KeyCtrl ? SelectMode::toggle : io.KeyShift ? SelectMode::range : SelectMode::replace);
+                    }
                     if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) focusSelection();
-                    ImGui::PushID(static_cast<int>(entity.id));
+                    // Arrastrar para reordenar (soltar encima de otro objeto lo coloca en su sitio).
+                    if (ImGui::BeginDragDropSource()) {
+                        const ge3d::EntityId dragged = entity.id;
+                        ImGui::SetDragDropPayload("GE3D_ENTITY", &dragged, sizeof dragged);
+                        ImGui::TextUnformatted(entity.name.c_str());
+                        ImGui::EndDragDropSource();
+                    }
+                    if (ImGui::BeginDragDropTarget()) {
+                        if (const auto* payload = ImGui::AcceptDragDropPayload("GE3D_ENTITY")) {
+                            moveId = *static_cast<const ge3d::EntityId*>(payload->Data);
+                            moveTo = index;
+                        }
+                        if (const auto* payload = ImGui::AcceptDragDropPayload("GE3D_ASSET")) {
+                            applyAsset(std::string(static_cast<const char*>(payload->Data)), entity.id, std::nullopt);
+                        }
+                        ImGui::EndDragDropTarget();
+                    }
                     if (ImGui::BeginPopupContextItem("menu")) {
-                        selected_ = entity.id;
+                        if (!isSelected(entity.id)) select(entity.id);
+                        if (ImGui::MenuItem("Copiar", "Ctrl+C")) action = Action::copy;
+                        if (ImGui::MenuItem("Pegar", "Ctrl+V", false, !clipboard_.empty())) action = Action::paste;
+                        ImGui::Separator();
+                        if (ImGui::MenuItem("Renombrar", "F2")) {
+                            renaming_ = entity.id;
+                            startRename_ = true;
+                        }
                         if (ImGui::MenuItem("Duplicar", "Ctrl+D")) action = Action::duplicate;
                         if (ImGui::MenuItem("Eliminar", "Supr")) action = Action::remove;
                         ImGui::Separator();
+                        if (entity.active ? ImGui::MenuItem("Desactivar") : ImGui::MenuItem("Activar")) {
+                            action = entity.active ? Action::deactivate : Action::activate;
+                        }
                         if (ImGui::MenuItem("Enfocar", "F")) focusSelection();
                         ImGui::EndPopup();
                     }
@@ -2137,13 +2362,20 @@ void EditorView::drawHierarchy() {
                 }
                 ImGui::TreePop();
             }
-            if (ImGui::IsWindowHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::IsAnyItemHovered()) {
-                selected_ = 0;
+            // Espacio libre bajo la lista: soltar ahí manda el objeto al final.
+            ImGui::Dummy({ImGui::GetContentRegionAvail().x, std::max(ImGui::GetContentRegionAvail().y, ImGui::GetFrameHeight())});
+            if (ImGui::BeginDragDropTarget()) {
+                if (const auto* payload = ImGui::AcceptDragDropPayload("GE3D_ENTITY")) {
+                    moveId = *static_cast<const ge3d::EntityId*>(payload->Data);
+                    moveTo = scene_.entities().empty() ? 0 : scene_.entities().size() - 1;
+                }
+                ImGui::EndDragDropTarget();
             }
+            if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && !ImGui::GetIO().KeyCtrl) clearSelection();
             if (ImGui::BeginPopupContextWindow("crear", ImGuiPopupFlags_MouseButtonRight | ImGuiPopupFlags_NoOpenOverItems)) {
-                if (ImGui::MenuItem("Crear caja")) createPrimitive(ge3d::Primitive::box);
-                if (ImGui::MenuItem("Crear rampa")) createPrimitive(ge3d::Primitive::ramp);
-                if (ImGui::MenuItem("Crear terreno")) createTerrain();
+                if (ImGui::MenuItem("Pegar", "Ctrl+V", false, !clipboard_.empty())) action = Action::paste;
+                ImGui::Separator();
+                createMenu();
                 ImGui::EndPopup();
             }
         }
@@ -2151,11 +2383,66 @@ void EditorView::drawHierarchy() {
     }
     ImGui::End();
     // Se aplica después de recorrer la lista para no modificarla mientras se itera.
+    if (moveId && !editInProgress()) {
+        if (auto command = ge3d::makeMoveCommand(scene_, moveId, moveTo)) execute(std::move(*command));
+    }
     if (action == Action::duplicate) duplicateSelection();
     if (action == Action::remove) deleteSelection();
+    if (action == Action::copy) copySelection();
+    if (action == Action::paste) pasteClipboard();
+    if (action == Action::activate || action == Action::deactivate) setActive(action == Action::activate);
 }
-
 // --- Inspector ---------------------------------------------------------------------------------
+
+void EditorView::applyComponentAction(ge3d::Entity& entity, const ge3d::Entity& frameStart, int kind, int action) {
+    // kind sigue el orden de Removal en drawInspector: 1 transformación, 2 forma, 3 vóxeles, 4 malla,
+    // 5 script, 6 cuerpo, 7 audio, 8 jugador.
+    if (action == 2) {
+        componentClipboardKind_ = kind;
+        componentClipboard_ = entity;
+        log("Valores del componente copiados");
+        return;
+    }
+    std::optional<ge3d::Entity> before = frameStart;
+    const auto& source = componentClipboard_;
+    const bool paste = action == 3;
+    if (paste && componentClipboardKind_ != kind) return;
+    switch (kind) {
+    case 1: entity.transform = paste ? source.transform : ge3d::Transform{}; break;
+    case 2:
+        if (paste && source.shape) entity.shape = source.shape;
+        else if (entity.shape) entity.shape = ge3d::makeShape(entity.shape->primitive);
+        break;
+    case 3:
+        if (paste && source.terrain) {
+            entity.terrain = source.terrain;
+            if (entity.terrain->voxels) entity.terrain->voxels = std::make_shared<ge3d::VoxelGrid>(*entity.terrain->voxels);
+        } else if (!paste) {
+            entity.terrain = ge3d::makeTerrain({});
+        }
+        break;
+    case 4:
+        if (paste && source.heightmap) {
+            entity.heightmap = source.heightmap;
+            if (entity.heightmap->data) entity.heightmap->data = std::make_shared<ge3d::Heightmap>(*entity.heightmap->data);
+        } else if (!paste) {
+            entity.heightmap = ge3d::makeHeightmap({});
+        }
+        break;
+    case 5:
+        if (paste && source.script) entity.script = source.script;
+        else if (entity.script) entity.script->parameters.clear();
+        break;
+    case 6: entity.body = paste ? source.body : std::optional<ge3d::BodyComponent>(ge3d::BodyComponent{}); break;
+    case 7:
+        if (paste && source.audio) entity.audio = source.audio;
+        else if (entity.audio) entity.audio = ge3d::AudioSourceComponent{entity.audio->clip};
+        break;
+    case 8: entity.player = paste ? source.player : std::optional<ge3d::PlayerComponent>(ge3d::PlayerComponent{}); break;
+    default: return;
+    }
+    commitModification(before, paste ? "Pegar valores" : "Restablecer componente");
+}
 
 void EditorView::drawInspector() {
     if (!showInspector_) return;
@@ -2171,7 +2458,15 @@ void EditorView::drawInspector() {
         }
         ImGui::PushID(static_cast<int>(entity->id));
         const ge3d::Entity frameStart = *entity;
-        // Cabecera: icono y nombre.
+        // Cabecera: casilla de activo, icono y nombre (como en Unity).
+        bool active = entity->active;
+        if (ImGui::Checkbox("##activo", &active)) {
+            std::optional<ge3d::Entity> before = frameStart;
+            entity->active = active;
+            commitModification(before, active ? "Activar" : "Desactivar");
+        }
+        ImGui::SetItemTooltip("Activo: si se desactiva, no se dibuja, no choca, no suena y su script no corre");
+        ImGui::SameLine();
         const float iconSize = ImGui::GetFrameHeight();
         ImGui::Dummy({iconSize, iconSize});
         drawIcon(ImGui::GetWindowDrawList(), entityIcon(*entity),
@@ -2190,8 +2485,49 @@ void EditorView::drawInspector() {
         }
         ImGui::Spacing();
 
+        if (selection_.size() > 1) {
+            ImGui::TextDisabled("%zu objetos seleccionados: se muestra el activo", selection_.size());
+            ImGui::TextDisabled("El gizmo mueve, gira y escala todos a la vez.");
+        }
+
+        // Cada componente tiene un menú (boton ... o clic derecho en su cabecera): Restablecer, Copiar valores,
+        // Pegar valores y Quitar.
+        enum class Removal { none, transform, shape, terrain, heightmap, script, body, audio, player };
+        Removal removal = Removal::none;
+        Removal menuKind = Removal::none;
+        int menuAction = 0;   // 1 restablecer, 2 copiar, 3 pegar
+        const auto removeMenu = [&](const char* id, Removal kind) {
+            ImGui::OpenPopupOnItemClick(id, ImGuiPopupFlags_MouseButtonRight);
+            const float button = ImGui::GetFrameHeight();
+            ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - button);
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{0, 0, 0, 0});
+            if (ImGui::Button((std::string("...##") + id).c_str(), {button, 0})) ImGui::OpenPopup(id);
+            ImGui::PopStyleColor();
+            if (ImGui::BeginPopup(id)) {
+                if (ImGui::MenuItem("Restablecer")) {
+                    menuKind = kind;
+                    menuAction = 1;
+                }
+                if (ImGui::MenuItem("Copiar valores")) {
+                    menuKind = kind;
+                    menuAction = 2;
+                }
+                if (ImGui::MenuItem("Pegar valores", nullptr, false, componentClipboardKind_ == static_cast<int>(kind))) {
+                    menuKind = kind;
+                    menuAction = 3;
+                }
+                if (kind != Removal::transform) {
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Quitar componente")) removal = kind;
+                }
+                ImGui::EndPopup();
+            }
+        };
+
         // Componente Transformación (siempre presente).
-        if (componentHeader("Transformacion", boldFont_)) {
+        const bool transformOpen = componentHeader("Transformacion", boldFont_);
+        removeMenu("transform_menu", Removal::transform);
+        if (transformOpen) {
             bool activated = false;
             bool deactivated = false;
             vectorRow("Posicion", entity->transform.position, 0.05f, 0, 0, activated, deactivated);
@@ -2203,15 +2539,6 @@ void EditorView::drawInspector() {
             ImGui::Spacing();
         }
 
-        // Los componentes se quitan con clic derecho en su cabecera.
-        enum class Removal { none, shape, terrain, heightmap, script, body, audio, player };
-        Removal removal = Removal::none;
-        const auto removeMenu = [&](const char* id, Removal kind) {
-            if (ImGui::BeginPopupContextItem(id)) {
-                if (ImGui::MenuItem("Quitar componente")) removal = kind;
-                ImGui::EndPopup();
-            }
-        };
 
         // Componente Forma: primitiva y un material por cara.
         if (entity->shape) {
@@ -2307,6 +2634,7 @@ void EditorView::drawInspector() {
             ImGui::Spacing();
         }
 
+        if (menuAction) applyComponentAction(*entity, frameStart, static_cast<int>(menuKind), menuAction);
         if (removal != Removal::none) {
             std::optional<ge3d::Entity> before = frameStart;
             if (removal == Removal::shape) entity->shape.reset();
@@ -2323,10 +2651,59 @@ void EditorView::drawInspector() {
         ImGui::Spacing();
         const float buttonWidth = std::min(ImGui::GetContentRegionAvail().x, 220 * scale_);
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (ImGui::GetContentRegionAvail().x - buttonWidth) * 0.5f);
-        if (ImGui::Button("Agregar componente", {buttonWidth, 0})) ImGui::OpenPopup("agregar_componente");
+        if (ImGui::Button("Agregar componente", {buttonWidth, 0})) {
+            addComponentFilter_[0] = '\0';
+            ImGui::OpenPopup("agregar_componente");
+        }
         if (ImGui::BeginPopup("agregar_componente")) {
             std::optional<ge3d::Entity> before = frameStart;
             bool added = false;
+            // Buscador como el de Unity: escribe y pulsa Intro para añadir el primero que coincida.
+            if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+            ImGui::SetNextItemWidth(240 * scale_);
+            const bool enter = ImGui::InputTextWithHint("##buscar_componente", "Buscar componente", addComponentFilter_,
+                                                        sizeof addComponentFilter_, ImGuiInputTextFlags_EnterReturnsTrue);
+            if (addComponentFilter_[0]) {
+                struct Option {
+                    const char* name;
+                    bool available;
+                    std::function<void()> add;
+                };
+                const std::vector<Option> options = {
+                    {"Forma: caja", !entity->shape, [&] { entity->shape = ge3d::makeShape(ge3d::Primitive::box, paintMaterial_); }},
+                    {"Forma: rampa", !entity->shape, [&] { entity->shape = ge3d::makeShape(ge3d::Primitive::ramp, paintMaterial_); }},
+                    {"Terreno", !entity->heightmap, [&] { entity->heightmap = ge3d::makeHeightmap(newHeightmap_); }},
+                    {"Terreno de voxeles", !entity->terrain, [&] { entity->terrain = ge3d::makeTerrain(newTerrain_); }},
+                    {"Cuerpo fisico", !entity->body, [&] { entity->body = ge3d::BodyComponent{}; }},
+                    {"Zona (trigger)", !entity->body, [&] { entity->body = ge3d::BodyComponent{ge3d::BodyType::trigger}; }},
+                    {"Fuente de audio", !entity->audio, [&] {
+                         entity->audio = ge3d::AudioSourceComponent{soundList_.empty() ? std::string() : soundList_.front()};
+                     }},
+                    {"Jugador", !entity->player, [&] { entity->player = ge3d::PlayerComponent{}; }},
+                };
+                bool any = false;
+                for (const auto& option : options) {
+                    if (!contains(option.name, addComponentFilter_)) continue;
+                    any = true;
+                    if ((ImGui::MenuItem(option.name, nullptr, false, option.available) || (enter && option.available && !added))) {
+                        option.add();
+                        added = true;
+                        ImGui::CloseCurrentPopup();
+                    }
+                }
+                for (const auto& path : scriptList_) {
+                    if (entity->script || !contains(path, addComponentFilter_)) continue;
+                    any = true;
+                    if (ImGui::MenuItem(("Script: " + path).c_str()) || (enter && !added)) {
+                        entity->script = ge3d::ScriptComponent{path, true, {}};
+                        added = true;
+                        ImGui::CloseCurrentPopup();
+                    }
+                }
+                if (!any) ImGui::TextDisabled("Nada coincide");
+                if (added) commitModification(before, "Agregar componente");
+                ImGui::EndPopup();
+            } else {
             if (ImGui::MenuItem("Forma: caja", nullptr, false, !entity->shape)) {
                 entity->shape = ge3d::makeShape(ge3d::Primitive::box, paintMaterial_);
                 added = true;
@@ -2378,16 +2755,59 @@ void EditorView::drawInspector() {
             }
             if (added) commitModification(before, "Agregar componente");
             ImGui::EndPopup();
+            }
         }
         ImGui::Spacing();
         ImGui::TextDisabled("UUID");
         ImGui::TextDisabled("%s", entity->uuid.toString().c_str());
         ImGui::PopID();
+        // Soltar un script, sonido o material del Proyecto en el Inspector lo asigna al objeto activo.
+        if (ImGui::BeginDragDropTargetCustom(ImGui::GetCurrentWindow()->InnerRect, ImGui::GetID("##soltar_inspector"))) {
+            if (const auto* payload = ImGui::AcceptDragDropPayload("GE3D_ASSET")) {
+                applyAsset(std::string(static_cast<const char*>(payload->Data)), selected_, std::nullopt);
+            }
+            ImGui::EndDragDropTarget();
+        }
     }
     ImGui::End();
 }
 
 // --- Vista de escena ---------------------------------------------------------------------------
+
+void EditorView::flyCamera() {
+    const auto& io = ImGui::GetIO();
+    const glm::vec3 eye = cameraPosition();
+    yaw_ -= io.MouseDelta.x * 0.005f;
+    pitch_ = std::clamp(pitch_ + io.MouseDelta.y * 0.005f, -1.55f, 1.55f);
+    const glm::vec3 orbit{std::sin(yaw_) * std::cos(pitch_), std::sin(pitch_), std::cos(yaw_) * std::cos(pitch_)};
+    const glm::vec3 forward = -orbit;
+    const glm::vec3 right = glm::normalize(glm::cross(forward, glm::vec3{0, 1, 0}));
+    glm::vec3 move{0.0f};
+    if (ImGui::IsKeyDown(ImGuiKey_W)) move += forward;
+    if (ImGui::IsKeyDown(ImGuiKey_S)) move -= forward;
+    if (ImGui::IsKeyDown(ImGuiKey_D)) move += right;
+    if (ImGui::IsKeyDown(ImGuiKey_A)) move -= right;
+    if (ImGui::IsKeyDown(ImGuiKey_E)) move.y += 1.0f;
+    if (ImGui::IsKeyDown(ImGuiKey_Q)) move.y -= 1.0f;
+    if (io.MouseWheel != 0.0f) {
+        flySpeed_ = std::clamp(flySpeed_ * std::pow(1.25f, io.MouseWheel), 0.5f, 300.0f);
+        flySpeedShown_ = ImGui::GetTime();
+    }
+    const float speed = flySpeed_ * (io.KeyShift ? 3.0f : 1.0f);
+    // La cámara gira sobre sí misma: el punto que se mira se recoloca delante del ojo.
+    pivot_ = eye + move * speed * std::min(io.DeltaTime, 0.1f) + forward * distance_;
+}
+
+void EditorView::drawSelectionOutline(ImDrawList* draw, ImVec2 origin, ImVec2 size) {
+    if (firstPerson_) return;
+    // Contorno naranja como en Unity: más intenso en el objeto activo.
+    for (const auto id : selection_) {
+        const auto* entity = scene_.find(id);
+        if (!entity || !entity->shape) continue;
+        const ImU32 color = id == selected_ ? IM_COL32(255, 150, 40, 255) : IM_COL32(255, 180, 90, 190);
+        drawPieceOutline(draw, entity->shape->primitive, modelMatrix(entity->transform), origin, size, color, IM_COL32(0, 0, 0, 0));
+    }
+}
 
 void EditorView::drawStylePopup() {
     if (!ImGui::BeginPopup("estilo_pixel")) return;
@@ -2573,9 +2993,10 @@ void EditorView::drawViewport(ImTextureID sceneTexture) {
             // En primera persona el ratón es del jugador: nada de órbita, gizmos ni selección en la vista.
             const bool hovered = viewHovered && !firstPerson_;
             const bool altOrbit = io.KeyAlt && ImGui::IsMouseDown(ImGuiMouseButton_Left);
-            orbiting_ = (orbiting_ || (hovered && (ImGui::IsMouseClicked(ImGuiMouseButton_Right) ||
-                                                   (io.KeyAlt && ImGui::IsMouseClicked(ImGuiMouseButton_Left))))) &&
-                        (ImGui::IsMouseDown(ImGuiMouseButton_Right) || altOrbit);
+            // Como en Unity: clic derecho mira y vuela con WASD/QE (rueda: velocidad); Alt + clic izquierdo orbita.
+            flying_ = (flying_ || (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right))) && ImGui::IsMouseDown(ImGuiMouseButton_Right);
+            orbiting_ = (orbiting_ || (hovered && io.KeyAlt && ImGui::IsMouseClicked(ImGuiMouseButton_Left))) && altOrbit;
+            if (flying_) flyCamera();
             const bool handDrag = tool_ == Tool::hand && !io.KeyAlt;
             panning_ = (panning_ || (hovered && (ImGui::IsMouseClicked(ImGuiMouseButton_Middle) ||
                                                  (handDrag && ImGui::IsMouseClicked(ImGuiMouseButton_Left))))) &&
@@ -2589,7 +3010,7 @@ void EditorView::drawViewport(ImTextureID sceneTexture) {
                 pivot_ += (-glm::vec3(inverseView[0]) * io.MouseDelta.x +
                             glm::vec3(inverseView[1]) * io.MouseDelta.y) * distance_ * 0.0018f;
             }
-            if (hovered) distance_ = std::clamp(distance_ * std::pow(0.87f, io.MouseWheel), 0.5f, maxDistance);
+            if (hovered && !flying_) distance_ = std::clamp(distance_ * std::pow(0.87f, io.MouseWheel), 0.5f, maxDistance);
 
             draw->PushClipRect(origin, end, true);
             ImGuizmo::SetDrawlist(draw);
@@ -2605,11 +3026,16 @@ void EditorView::drawViewport(ImTextureID sceneTexture) {
                 const float step = tool_ == Tool::rotate ? 15.0f : 0.25f;
                 const float snapValues[] = {step, step, step};
                 const ge3d::Entity beforeManipulate = *entity;
-                auto model = modelMatrix(entity->transform);
+                std::vector<ge3d::Entity> beforeGroup;
+                for (const auto id : selection_) {
+                    if (const auto* selectedEntity = scene_.find(id)) beforeGroup.push_back(*selectedEntity);
+                }
+                const glm::mat4 oldModel = modelMatrix(entity->transform);
+                auto model = oldModel;
                 if (ImGuizmo::Manipulate(glm::value_ptr(viewMatrix), glm::value_ptr(projectionMatrix),
                         operation,
                         localAxes_ || tool_ == Tool::scale ? ImGuizmo::LOCAL : ImGuizmo::WORLD,
-                        glm::value_ptr(model), nullptr, snap_ ? snapValues : nullptr)) {
+                        glm::value_ptr(model), nullptr, snap_ || io.KeyCtrl ? snapValues : nullptr)) {
                     float translation[3], rotation[3], scaling[3];
                     ImGuizmo::DecomposeMatrixToComponents(glm::value_ptr(model), translation, rotation, scaling);
                     entity->transform = {
@@ -2617,9 +3043,29 @@ void EditorView::drawViewport(ImTextureID sceneTexture) {
                         {rotation[0], rotation[1], rotation[2]},
                         {std::max(0.01f, scaling[0]), std::max(0.01f, scaling[1]), std::max(0.01f, scaling[2])}
                     };
+                    // El resto de la selección sigue al objeto activo: mismo desplazamiento y giro (alrededor
+                    // del activo) o la misma proporción de escala.
+                    const glm::mat4 delta = modelMatrix(entity->transform) * glm::inverse(oldModel);
+                    const auto& oldScale = beforeManipulate.transform.scale;
+                    const auto& newScale = entity->transform.scale;
+                    for (const auto id : selection_) {
+                        auto* other = scene_.find(id);
+                        if (!other || other == entity) continue;
+                        if (tool_ == Tool::scale) {
+                            other->transform.scale = {std::max(0.01f, other->transform.scale.x * newScale.x / oldScale.x),
+                                                      std::max(0.01f, other->transform.scale.y * newScale.y / oldScale.y),
+                                                      std::max(0.01f, other->transform.scale.z * newScale.z / oldScale.z)};
+                            continue;
+                        }
+                        glm::mat4 moved = delta * modelMatrix(other->transform);
+                        float t[3], r[3], k[3];
+                        ImGuizmo::DecomposeMatrixToComponents(glm::value_ptr(moved), t, r, k);
+                        other->transform.position = {t[0], t[1], t[2]};
+                        if (tool_ == Tool::rotate) other->transform.rotationDegrees = {r[0], r[1], r[2]};
+                    }
                 }
                 // El arrastre se previsualiza en vivo y se guarda como una sola operación al soltar.
-                if (ImGuizmo::IsUsing() && !gizmoEdit_) gizmoEdit_ = beforeManipulate;
+                if (ImGuizmo::IsUsing() && gizmoEdit_.empty()) gizmoEdit_ = beforeGroup;
                 overGizmo = ImGuizmo::IsOver() || ImGuizmo::IsUsing();
             } else {
                 // Sin gizmo visible: una llamada sin operaciones prepara la cámara del cubo de orientación.
@@ -2638,7 +3084,7 @@ void EditorView::drawViewport(ImTextureID sceneTexture) {
                 overCube = ImGuizmo::IsViewManipulateHovered();
             }
 
-            const bool canUseMouse = hovered && !overGizmo && !overCube && !io.KeyAlt && !orbiting_ && !panning_;
+            const bool canUseMouse = hovered && !overGizmo && !overCube && !io.KeyAlt && !orbiting_ && !panning_ && !flying_;
             if (tool_ == Tool::paint) {
                 // Pintar: vista previa de la cara bajo el cursor, trazo con arrastre, cuentagotas con Ctrl.
                 const auto hit = canUseMouse ? raycast(io.MousePos, origin, size) : std::nullopt;
@@ -2670,6 +3116,7 @@ void EditorView::drawViewport(ImTextureID sceneTexture) {
             }
             if (tool_ == Tool::build) handleBuildTool(draw, origin, size, canUseMouse);
             if (tool_ == Tool::terrain) handleTerrainTool(draw, origin, size, canUseMouse);
+            drawSelectionOutline(draw, origin, size);
             drawPlayOverlay(draw, origin, size);
             draw->PopClipRect();
 
@@ -2692,7 +3139,61 @@ void EditorView::drawViewport(ImTextureID sceneTexture) {
                 ImGui::SetWindowFocus();
                 pick(io.MousePos, origin, size);
             }
+            if (marquee_) {
+                const ImVec2 a{std::min(marqueeStart_.x, io.MousePos.x), std::min(marqueeStart_.y, io.MousePos.y)};
+                const ImVec2 b{std::max(marqueeStart_.x, io.MousePos.x), std::max(marqueeStart_.y, io.MousePos.y)};
+                if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                    draw->AddRectFilled(a, b, IM_COL32(80, 140, 220, 50));
+                    draw->AddRect(a, b, IM_COL32(110, 170, 255, 220));
+                } else {
+                    marquee_ = false;
+                    const bool additive = io.KeyCtrl || io.KeyShift;
+                    if (b.x - a.x < 4 && b.y - a.y < 4) {
+                        if (!additive) clearSelection();
+                    } else {
+                        // Lo que tenga el centro dentro del rectángulo.
+                        if (!additive) clearSelection();
+                        const glm::mat4 clip = projection() * view();
+                        for (const auto& candidate : scene_.entities()) {
+                            const glm::vec4 c = clip * glm::vec4(vector(candidate.transform.position), 1.0f);
+                            if (c.w <= 0.01f) continue;
+                            const ImVec2 p{origin.x + (c.x / c.w * 0.5f + 0.5f) * size.x, origin.y + (0.5f - c.y / c.w * 0.5f) * size.y};
+                            if (p.x >= a.x && p.x <= b.x && p.y >= a.y && p.y <= b.y) select(candidate.id, SelectMode::add);
+                        }
+                    }
+                }
+            }
+            if (flying_ || ImGui::GetTime() - flySpeedShown_ < 1.2) {
+                char speed[64];
+                std::snprintf(speed, sizeof speed, "Vuelo: %.1f m/s  (rueda: velocidad, Shift: x3)", flySpeed_);
+                draw->AddText({origin.x + 8 * scale_, end.y - ImGui::GetTextLineHeight() - 6 * scale_}, IM_COL32(255, 255, 255, 190), speed);
+            }
             ImGui::Dummy(available);
+            // Soltar un recurso del Proyecto sobre un objeto de la vista (Shift: material solo en esa cara).
+            if (ImGui::BeginDragDropTarget()) {
+                if (const auto* payload = ImGui::AcceptDragDropPayload("GE3D_ASSET", ImGuiDragDropFlags_AcceptBeforeDelivery |
+                                                                                         ImGuiDragDropFlags_AcceptNoDrawDefaultRect)) {
+                    const std::string asset(static_cast<const char*>(payload->Data));
+                    const auto hit = raycast(io.MousePos, origin, size);
+                    auto* overlay = ImGui::GetWindowDrawList();
+                    if (hit) {
+                        if (const auto* target = scene_.find(hit->entity); target && target->shape) {
+                            drawPieceOutline(overlay, target->shape->primitive, modelMatrix(target->transform), origin, size,
+                                             IM_COL32(120, 200, 255, 255), IM_COL32(120, 200, 255, 50),
+                                             io.KeyShift && asset.starts_with("material:") ? static_cast<int>(hit->face) : -1);
+                        }
+                    }
+                    if (payload->IsDelivery()) {
+                        if (asset.ends_with(".scene.json")) {
+                            requestSceneChange(SceneChange::open, contentRoot_ / ge3d::pathFromUtf8(asset));
+                        } else if (hit) {
+                            const bool face = io.KeyShift && !hit->terrain;
+                            applyAsset(asset, hit->entity, face ? std::optional<std::uint32_t>(hit->face) : std::nullopt);
+                        }
+                    }
+                }
+                ImGui::EndDragDropTarget();
+            }
         }
     }
     ImGui::End();
@@ -2700,60 +3201,387 @@ void EditorView::drawViewport(ImTextureID sceneTexture) {
     if (building_ && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) finishBuildStroke();
     if (erasing_ && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) finishEraseStroke();
     if (sculpting_ && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) finishSculpt();
-    if (gizmoEdit_ && (!ImGuizmo::IsUsing() || !ImGui::IsMouseDown(ImGuiMouseButton_Left))) {
+    if (!gizmoEdit_.empty() && (!ImGuizmo::IsUsing() || !ImGui::IsMouseDown(ImGuiMouseButton_Left))) {
         const char* label = tool_ == Tool::rotate ? "Rotar" : tool_ == Tool::scale ? "Escalar" : "Mover";
-        commitModification(gizmoEdit_, label);
+        if (auto command = ge3d::makeModifyCommand(scene_, gizmoEdit_, label)) activeHistory().record(std::move(*command));
+        gizmoEdit_.clear();
     }
 }
 
 // --- Proyecto ----------------------------------------------------------------------------------
 
 void EditorView::drawProjectNode(const ProjectNode& node, bool root) {
-    ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_SpanAvailWidth | ImGuiTreeNodeFlags_OpenOnArrow |
-                               ImGuiTreeNodeFlags_OpenOnDoubleClick;
+    // Columna izquierda: solo carpetas.
+    if (!node.directory) return;
+    const bool hasFolders = std::any_of(node.children.begin(), node.children.end(), [](const ProjectNode& c) { return c.directory; });
+    ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_SpanAvailWidth | ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick;
     if (root) flags |= ImGuiTreeNodeFlags_DefaultOpen;
-    if (!node.directory) flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
-    const bool scene = !node.directory && isSceneFile(node.path);
-    std::error_code error;
-    if (scene && std::filesystem::equivalent(node.path, scenePath_, error)) flags |= ImGuiTreeNodeFlags_Selected;
-    const Icon icon = node.directory ? Icon::folder : scene ? Icon::scene : Icon::file;
-    const ImU32 color = ImGui::GetColorU32(node.directory ? ImVec4{0.85f, 0.72f, 0.38f, 1} : scene ? accentHover : gray(0.7f));
-    const bool open = treeItem(&node, node.name.c_str(), icon, color, flags);
-    if (scene) {
-        ImGui::SetItemTooltip("Doble clic para abrir\n%s", ge3d::pathToUtf8(node.path).c_str());
-        if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
-            requestSceneChange(SceneChange::open, node.path);
-        }
+    if (!hasFolders) flags |= ImGuiTreeNodeFlags_Leaf;
+    if (!projectMaterials_ && node.path == projectFolder_) flags |= ImGuiTreeNodeFlags_Selected;
+    const bool open = treeItem(&node, node.name.c_str(), Icon::folder, ImGui::GetColorU32(ImVec4{0.85f, 0.72f, 0.38f, 1}), flags);
+    if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
+        projectFolder_ = node.path;
+        projectMaterials_ = false;
     }
-    if (node.directory && open) {
+    if (open) {
         for (const auto& child : node.children) drawProjectNode(child, false);
         ImGui::TreePop();
     }
 }
 
+const EditorView::ProjectNode* EditorView::findProjectNode(const ProjectNode& node, const std::filesystem::path& path) const {
+    if (node.path == path) return &node;
+    for (const auto& child : node.children) {
+        if (!child.directory) continue;
+        if (const auto* found = findProjectNode(child, path)) return found;
+    }
+    return nullptr;
+}
+
+std::string EditorView::assetPath(const std::filesystem::path& path) const {
+    std::error_code error;
+    auto relative = ge3d::pathToUtf8(std::filesystem::relative(path, contentRoot_, error));
+    std::replace(relative.begin(), relative.end(), '\\', '/');
+    return relative;
+}
+
+void EditorView::applyAsset(const std::string& asset, ge3d::EntityId id, std::optional<std::uint32_t> face) {
+    auto* entity = scene_.find(id);
+    if (!entity || editInProgress()) return;
+    std::optional<ge3d::Entity> before = *entity;
+    const char* label = nullptr;
+    if (asset.starts_with("material:")) {
+        const auto material = asset.substr(9);
+        if (!entity->shape) {
+            log("Solo las piezas con Forma tienen materiales (los terrenos usan capas)", true);
+            return;
+        }
+        if (face && *face < ge3d::maxFaces) entity->shape->materials[*face] = material;
+        else entity->shape->materials.fill(material);
+        paintMaterial_ = material;
+        label = "Asignar material";
+    } else if (asset.ends_with(".luau") && ge3d::isValidScriptPath(asset)) {
+        if (!entity->script || entity->script->path != asset) entity->script = ge3d::ScriptComponent{asset, true, {}};
+        label = "Asignar script";
+    } else if (asset.ends_with(".wav") && ge3d::isValidSoundPath(asset)) {
+        if (entity->audio) entity->audio->clip = asset;
+        else entity->audio = ge3d::AudioSourceComponent{asset};
+        label = "Asignar sonido";
+    } else {
+        log("Ese recurso no se puede asignar a un objeto: " + asset, true);
+        return;
+    }
+    commitModification(before, label);
+    select(id);
+}
 void EditorView::drawProject() {
     if (!showProject_) return;
-    if (ImGui::Begin("Proyecto", &showProject_)) {
-        if (ImGui::Button("Actualizar")) refreshProject();
-        ImGui::SameLine();
-        ImGui::TextDisabled("%s", ge3d::pathToUtf8(contentRoot_).c_str());
-        ImGui::Separator();
-        if (!projectFound_) {
-            ImGui::TextDisabled("No existe la carpeta de contenido.");
-            if (ImGui::Button("Crear carpeta")) {
-                std::error_code error;
-                std::filesystem::create_directories(contentRoot_ / "scenes", error);
-                if (error) log("No se pudo crear la carpeta: " + error.message(), true);
-                refreshProject();
-            }
-        } else if (ImGui::BeginChild("##archivos")) {
-            drawProjectNode(project_, true);
+    namespace fs = std::filesystem;
+    if (!ImGui::Begin("Proyecto", &showProject_)) {
+        ImGui::End();
+        return;
+    }
+    if (!projectFound_) {
+        ImGui::TextDisabled("No existe la carpeta de contenido.");
+        if (ImGui::Button("Crear carpeta")) {
+            std::error_code error;
+            fs::create_directories(contentRoot_ / "scenes", error);
+            if (error) log("No se pudo crear la carpeta: " + error.message(), true);
+            refreshProject();
         }
-        if (projectFound_) ImGui::EndChild();
+        ImGui::End();
+        return;
+    }
+    if (!findProjectNode(project_, projectFolder_)) projectFolder_ = contentRoot_;
+
+    // Barra: actualizar, ruta, buscador y tamaño de los iconos.
+    if (ImGui::Button("Actualizar")) refreshProject();
+    ImGui::SameLine();
+    ImGui::AlignTextToFramePadding();
+    const std::string here = projectMaterials_ ? "Content / Materiales"
+                           : "Content" + (projectFolder_ == contentRoot_ ? std::string() : " / " + assetPath(projectFolder_));
+    ImGui::TextDisabled("%s", here.c_str());
+    const float tools = 300 * scale_;
+    ImGui::SameLine(std::max(ImGui::GetCursorPosX() + 10, ImGui::GetWindowWidth() - tools));
+    ImGui::SetNextItemWidth(170 * scale_);
+    ImGui::InputTextWithHint("##buscar_recurso", "Buscar en el proyecto", projectFilter_, sizeof projectFilter_);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(-1);
+    ImGui::SliderFloat("##tamano", &projectTile_, 40.0f, 120.0f, "");
+    ImGui::SetItemTooltip("Tamano de los iconos");
+    ImGui::Separator();
+
+    // Columna de carpetas.
+    if (ImGui::BeginChild("##carpetas", {180 * scale_, 0}, ImGuiChildFlags_ResizeX)) {
+        drawProjectNode(project_, true);
+        if (treeItem("##materiales", "Materiales", Icon::paint, ImGui::GetColorU32(accentHover),
+                     ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen | ImGuiTreeNodeFlags_SpanAvailWidth |
+                         (projectMaterials_ ? ImGuiTreeNodeFlags_Selected : 0))) {
+        }
+        if (ImGui::IsItemClicked()) projectMaterials_ = true;
+        ImGui::SetItemTooltip("Catalogo de materiales (materials.json): arrastralos sobre las piezas");
+    }
+    ImGui::EndChild();
+    ImGui::SameLine();
+
+    // Rejilla de recursos.
+    struct Item {
+        std::string name;
+        fs::path path;
+        std::string asset;      // ruta relativa (o "material:<id>")
+        bool directory{};
+        Icon icon{Icon::file};
+        ImU32 color{};
+        ImTextureID texture{};
+    };
+    std::vector<Item> items;
+    const auto kind = [&](const fs::path& path, bool directory, Item& item) {
+        const auto name = ge3d::pathToUtf8(path.filename());
+        item.icon = directory ? Icon::folder : name.ends_with(".scene.json") ? Icon::scene : name.ends_with(".luau") ? Icon::script
+                  : name.ends_with(".wav") ? Icon::sound : Icon::file;
+        item.color = ImGui::GetColorU32(directory ? ImVec4{0.85f, 0.72f, 0.38f, 1} : item.icon == Icon::scene ? accentHover
+                                       : item.icon == Icon::script ? ImVec4{0.55f, 0.85f, 0.55f, 1}
+                                       : item.icon == Icon::sound ? ImVec4{0.95f, 0.65f, 0.40f, 1} : gray(0.7f));
+    };
+    const bool searching = projectFilter_[0] != '\0';
+    if (projectMaterials_ || searching) {
+        const auto& materials = library_.materials();
+        for (std::size_t i = 0; i < materials.size(); ++i) {
+            if (!contains(materials[i].name, projectFilter_) && !contains(materials[i].id, projectFilter_)) continue;
+            Item item{materials[i].name, {}, "material:" + materials[i].id, false, Icon::paint, ImGui::GetColorU32(accentHover)};
+            if (i < thumbnails_.size()) item.texture = thumbnails_[i];
+            items.push_back(std::move(item));
+        }
+    }
+    if (searching) {
+        // Búsqueda en todo el proyecto, como en Unity.
+        const auto collect = [&](auto& self, const ProjectNode& node) -> void {
+            for (const auto& child : node.children) {
+                if (contains(child.name, projectFilter_)) {
+                    Item item{child.name, child.path, assetPath(child.path), child.directory};
+                    kind(child.path, child.directory, item);
+                    items.push_back(std::move(item));
+                }
+                if (child.directory) self(self, child);
+            }
+        };
+        collect(collect, project_);
+    } else if (!projectMaterials_) {
+        if (const auto* folder = findProjectNode(project_, projectFolder_)) {
+            for (const auto& child : folder->children) {
+                Item item{child.name, child.path, assetPath(child.path), child.directory};
+                kind(child.path, child.directory, item);
+                items.push_back(std::move(item));
+            }
+        }
+    }
+
+    bool openCreate = false;
+    if (ImGui::BeginChild("##recursos")) {
+        const float tile = projectTile_ * scale_;
+        const float cell = tile + 14 * scale_;
+        const int columns = std::max(1, static_cast<int>(ImGui::GetContentRegionAvail().x / cell));
+        auto* draw = ImGui::GetWindowDrawList();
+        for (std::size_t i = 0; i < items.size(); ++i) {
+            const auto& item = items[i];
+            if (i % static_cast<std::size_t>(columns) != 0) ImGui::SameLine();
+            ImGui::PushID(static_cast<int>(i));
+            ImGui::BeginGroup();
+            const ImVec2 corner = ImGui::GetCursorScreenPos();
+            const float labelHeight = ImGui::GetTextLineHeight() * 2;
+            ImGui::InvisibleButton("##recurso", {cell, tile + labelHeight + 4});
+            const bool hovered = ImGui::IsItemHovered();
+            const bool selected = projectSelected_ == item.asset;
+            if (selected || hovered) {
+                draw->AddRectFilled(corner, {corner.x + cell, corner.y + tile + labelHeight + 4},
+                                    selected ? ImGui::GetColorU32(accent) : ImGui::GetColorU32(gray(0.3f)), 4.0f);
+            }
+            const ImVec2 iconMin{corner.x + (cell - tile) * 0.5f, corner.y + 2};
+            if (item.texture) {
+                draw->AddImage(item.texture, {iconMin.x + tile * 0.1f, iconMin.y + tile * 0.1f}, {iconMin.x + tile * 0.9f, iconMin.y + tile * 0.9f});
+            } else {
+                drawIcon(draw, item.icon, {iconMin.x + tile * 0.5f, iconMin.y + tile * 0.5f}, tile * 0.32f, item.color);
+            }
+            // Nombre (dos líneas como máximo).
+            std::string label = item.name;
+            const float maxWidth = cell - 4;
+            while (label.size() > 3 && ImGui::CalcTextSize(label.c_str()).x > maxWidth * 2) label.pop_back();
+            if (label.size() < item.name.size()) label += "...";
+            draw->PushClipRect({corner.x, corner.y}, {corner.x + cell, corner.y + tile + labelHeight + 4}, true);
+            draw->AddText(nullptr, 0.0f, {corner.x + 2, corner.y + tile + 2}, ImGui::GetColorU32(ImGuiCol_Text), label.c_str(), nullptr, maxWidth);
+            draw->PopClipRect();
+
+            // Lo que sigue usa el último elemento: el botón invisible de la casilla (tiene identificador).
+            if (ImGui::IsItemClicked()) projectSelected_ = item.asset;
+            if (hovered) ImGui::SetTooltip("%s", item.asset.starts_with("material:") ? item.name.c_str() : item.asset.c_str());
+            if (hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                // Doble clic: entrar en la carpeta, abrir la escena o el script, escuchar el sonido.
+                if (item.directory) {
+                    projectFolder_ = item.path;
+                    projectFilter_[0] = '\0';
+                } else if (item.icon == Icon::scene) {
+                    requestSceneChange(SceneChange::open, item.path);
+                } else if (item.icon == Icon::script) {
+                    openScript(item.asset);
+                } else if (item.icon == Icon::sound) {
+                    if (!audio_) {
+                        audio_ = std::make_unique<ge3d::AudioSystem>(contentRoot_, [](bool error, const std::string& message) {
+                            editorLog().add(error ? LogLevel::warning : LogLevel::info, message);
+                        });
+                    }
+                    audio_->playOneShot(item.asset, 1.0f, std::nullopt);
+                    audio_->flush();
+                } else if (item.asset.starts_with("material:")) {
+                    paintMaterial_ = item.asset.substr(9);
+                    tool_ = Tool::paint;
+                }
+            }
+            // Arrastrar a la Escena, la Jerarquía o el Inspector.
+            if (!item.directory && ImGui::BeginDragDropSource()) {
+                ImGui::SetDragDropPayload("GE3D_ASSET", item.asset.c_str(), item.asset.size() + 1);
+                ImGui::TextUnformatted(item.name.c_str());
+                ImGui::TextDisabled(item.icon == Icon::scene ? "Soltar en la Escena para abrirla" : "Soltar sobre un objeto");
+                ImGui::EndDragDropSource();
+            }
+            if (!item.asset.starts_with("material:") && ImGui::BeginPopupContextItem("menu_recurso")) {
+                projectSelected_ = item.asset;
+                if (ImGui::MenuItem("Abrir")) {
+                    if (item.directory) projectFolder_ = item.path;
+                    else if (item.icon == Icon::scene) requestSceneChange(SceneChange::open, item.path);
+                    else if (item.icon == Icon::script) openScript(item.asset);
+                }
+                if (ImGui::MenuItem("Renombrar")) {
+                    projectRename_ = item.path;
+                    copyText(projectRenameBuffer_, sizeof projectRenameBuffer_, item.name);
+                }
+                if (ImGui::MenuItem("Eliminar")) projectDelete_ = item.path;
+                ImGui::Separator();
+                if (ImGui::MenuItem("Mostrar en el Explorador")) revealInExplorer(item.path);
+                ImGui::EndPopup();
+            }
+            ImGui::EndGroup();
+            ImGui::PopID();
+        }
+        if (items.empty()) ImGui::TextDisabled(searching ? "Nada coincide" : "Carpeta vacia");
+        // Clic derecho en el fondo: crear.
+        if (!projectMaterials_ && ImGui::BeginPopupContextWindow("crear_recurso", ImGuiPopupFlags_MouseButtonRight | ImGuiPopupFlags_NoOpenOverItems)) {
+            if (ImGui::BeginMenu("Crear")) {
+                if (ImGui::MenuItem("Carpeta")) {
+                    auto path = projectFolder_ / "Nueva carpeta";
+                    std::error_code error;
+                    for (int n = 2; fs::exists(path, error); ++n) path = projectFolder_ / ("Nueva carpeta " + std::to_string(n));
+                    fs::create_directory(path, error);
+                    refreshProject();
+                }
+                if (ImGui::MenuItem("Script Luau")) openCreate = true;
+                if (ImGui::MenuItem("Escena")) {
+                    auto path = projectFolder_ / "nueva.scene.json";
+                    std::error_code error;
+                    for (int n = 2; fs::exists(path, error); ++n) path = projectFolder_ / ("nueva_" + std::to_string(n) + ".scene.json");
+                    ge3d::Scene empty;
+                    empty.create("Suelo", ge3d::Primitive::box, {{0, -0.25f, 0}, {}, {8, 0.5f, 8}});
+                    try {
+                        ge3d::saveSceneFile(empty, path);
+                        log("Escena creada: " + assetPath(path));
+                    } catch (const std::exception& failure) {
+                        log(std::string("No se pudo crear la escena: ") + failure.what(), true);
+                    }
+                    refreshProject();
+                }
+                ImGui::EndMenu();
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Actualizar")) refreshProject();
+            if (ImGui::MenuItem("Mostrar en el Explorador")) revealInExplorer(projectFolder_);
+            ImGui::EndPopup();
+        }
+    }
+    ImGui::EndChild();
+    if (openCreate) {
+        newScriptName_[0] = '\0';
+        ImGui::OpenPopup("nuevo_script_proyecto");
+    }
+    if (ImGui::BeginPopup("nuevo_script_proyecto")) {
+        ImGui::TextUnformatted("Nombre del script (se crea en Content/scripts)");
+        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+        if (ImGui::InputText("##nombre_script", newScriptName_, sizeof newScriptName_, ImGuiInputTextFlags_EnterReturnsTrue) ||
+            ImGui::Button("Crear")) {
+            createScript(newScriptName_);
+            refreshProject();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
+    // Renombrar: las referencias de la escena abierta (scripts y sonidos) se actualizan.
+    if (!projectRename_.empty()) ImGui::OpenPopup("renombrar_recurso");
+    if (ImGui::BeginPopupModal("renombrar_recurso", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("Nuevo nombre para %s", ge3d::pathToUtf8(projectRename_.filename()).c_str());
+        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+        const bool enter = ImGui::InputText("##nuevo_nombre", projectRenameBuffer_, sizeof projectRenameBuffer_, ImGuiInputTextFlags_EnterReturnsTrue);
+        if (enter || ImGui::Button("Renombrar")) {
+            const auto target = projectRename_.parent_path() / ge3d::pathFromUtf8(projectRenameBuffer_);
+            std::error_code error;
+            if (projectRenameBuffer_[0] == '\0' || fs::exists(target, error)) {
+                log("Ya existe un archivo con ese nombre (o el nombre esta vacio)", true);
+            } else {
+                const auto oldAsset = assetPath(projectRename_);
+                fs::rename(projectRename_, target, error);
+                if (error) {
+                    log("No se pudo renombrar: " + error.message(), true);
+                } else {
+                    const auto newAsset = assetPath(target);
+                    std::vector<ge3d::Entity> before;
+                    for (const auto& entity : scene_.entities()) {
+                        const bool script = entity.script && entity.script->path == oldAsset;
+                        const bool sound = entity.audio && entity.audio->clip == oldAsset;
+                        if (!script && !sound) continue;
+                        before.push_back(entity);
+                        auto* changed = scene_.find(entity.id);
+                        if (script) changed->script->path = newAsset;
+                        if (sound) changed->audio->clip = newAsset;
+                    }
+                    if (auto command = ge3d::makeModifyCommand(scene_, before, "Actualizar referencias")) activeHistory().record(std::move(*command));
+                    for (auto& document : documents_) {
+                        if (document.path == oldAsset) document.path = newAsset;
+                    }
+                    log("Renombrado " + oldAsset + " -> " + newAsset + (before.empty() ? "" : " (referencias de la escena actualizadas)"));
+                    refreshProject();
+                    watchScripts(true);
+                }
+            }
+            projectRename_.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancelar")) {
+            projectRename_.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+    // Eliminar: a la papelera de reciclaje (se puede recuperar).
+    if (!projectDelete_.empty()) ImGui::OpenPopup("eliminar_recurso");
+    if (ImGui::BeginPopupModal("eliminar_recurso", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("Enviar %s a la papelera de reciclaje?", ge3d::pathToUtf8(projectDelete_.filename()).c_str());
+        ImGui::TextDisabled("Las escenas que lo usen dejaran de encontrarlo.");
+        if (ImGui::Button("Eliminar")) {
+            if (moveToRecycleBin(projectDelete_)) log("Enviado a la papelera: " + assetPath(projectDelete_));
+            else log("No se pudo eliminar " + assetPath(projectDelete_), true);
+            projectDelete_.clear();
+            refreshProject();
+            watchScripts(true);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancelar")) {
+            projectDelete_.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
     }
     ImGui::End();
 }
-
 // --- Consola -----------------------------------------------------------------------------------
 
 void EditorView::drawConsole() {
@@ -2768,6 +3596,10 @@ void EditorView::drawConsole() {
             for (const auto& entry : entries) text += "[" + entry.time + "] " + entry.message + "\n";
             ImGui::SetClipboardText(text.c_str());
         }
+        ImGui::SameLine();
+        if (toggleButton("Limpiar al jugar", clearOnPlay_, "Vaciar la Consola al pulsar Play")) clearOnPlay_ = !clearOnPlay_;
+        ImGui::SameLine();
+        if (toggleButton("Pausa en error", pauseOnError_, "Pausar el juego en cuanto aparece un error")) pauseOnError_ = !pauseOnError_;
         ImGui::SameLine();
         ImGui::SetNextItemWidth(std::min(220 * scale_, ImGui::GetContentRegionAvail().x * 0.4f));
         ImGui::InputTextWithHint("##filtro", "Filtrar", consoleFilter_, sizeof consoleFilter_);
@@ -2799,10 +3631,22 @@ void EditorView::drawConsole() {
                 ImGui::TextDisabled("[%s]", entry.time.c_str());
                 ImGui::SameLine();
                 ImGui::PushStyleColor(ImGuiCol_Text, color);
-                if (entry.repeats > 1) {
-                    ImGui::Text("%s  (x%d)", entry.message.c_str(), entry.repeats);
+                const std::string text = entry.repeats > 1 ? entry.message + "  (x" + std::to_string(entry.repeats) + ")" : entry.message;
+                // Un mensaje que cita "scripts/archivo.luau:línea" se abre en la pestaña Código con un clic.
+                const auto at = entry.message.find(".luau:");
+                const auto start = at == std::string::npos ? std::string::npos : entry.message.rfind("scripts/", at);
+                if (start != std::string::npos) {
+                    const auto path = entry.message.substr(start, at + 5 - start);
+                    int line = 0;
+                    for (auto i = at + 6; i < entry.message.size() && std::isdigit(static_cast<unsigned char>(entry.message[i])); ++i) {
+                        line = line * 10 + (entry.message[i] - '0');
+                    }
+                    ImGui::PushID(&entry);
+                    if (ImGui::Selectable(text.c_str()) && ge3d::isValidScriptPath(path)) openScript(path, line);
+                    ImGui::SetItemTooltip("Abrir %s en la linea %d", path.c_str(), line);
+                    ImGui::PopID();
                 } else {
-                    ImGui::TextUnformatted(entry.message.c_str());
+                    ImGui::TextUnformatted(text.c_str());
                 }
                 ImGui::PopStyleColor();
             }
@@ -2838,6 +3682,14 @@ void EditorView::buildDefaultLayout(ImGuiID dock) {
 }
 
 void EditorView::draw(ImTextureID sceneTexture) {
+    validateSelection();
+    // Pausa en error (como Error Pause de Unity): el juego se detiene en el fotograma del primer error.
+    const int errors = editorLog().counts()[2];
+    if (isPlaying() && !paused_ && pauseOnError_ && errors > lastErrorCount_) {
+        paused_ = true;
+        log("Pausado por un error (Consola > Pausa en error)");
+    }
+    lastErrorCount_ = errors;
     if (isPlaying() && !paused_) {
         ++playFrames_;
         updatePlay(std::min(ImGui::GetIO().DeltaTime, 1.0f / 20.0f));
