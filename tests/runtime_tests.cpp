@@ -1,5 +1,7 @@
 #include "ge3d/History.hpp"
 #include "ge3d/Materials.hpp"
+#include "ge3d/Model.hpp"
+#include "ge3d/Prefab.hpp"
 #include "ge3d/Primitives.hpp"
 #include "ge3d/SceneIO.hpp"
 
@@ -7,7 +9,9 @@
 #include <cmath>
 #include <cctype>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -480,6 +484,231 @@ void testWater() {
     expect(std::abs(parsed->water(100, 32) - map->water(100, 32)) < 1.0f / 64.0f, "el agua se guarda y se recupera");
 }
 
+// Selección múltiple: borrar, duplicar, pegar y reordenar son un solo paso de deshacer.
+void testMultiCommands() {
+    auto scene = ge3d::makeStarterScene();
+    ge3d::History history;
+    const auto ids = std::vector<ge3d::EntityId>{scene.entities()[0].id, scene.entities()[2].id};
+    const auto names = std::vector<std::string>{scene.entities()[0].name, scene.entities()[1].name, scene.entities()[2].name};
+    history.execute(scene, *ge3d::makeDeleteCommand(scene, ids));
+    expect(scene.entities().size() == 1 && scene.entities()[0].name == names[1], "borrar varias entidades a la vez");
+    history.undo(scene);
+    expect(scene.entities().size() == 3 && scene.entities()[0].name == names[0] && scene.entities()[2].name == names[2],
+           "deshacer el borrado multiple devuelve cada entidad a su sitio");
+
+    std::vector<ge3d::EntityId> created;
+    history.execute(scene, *ge3d::makeDuplicateCommand(scene, ids, {0, 0, 0}, &created));
+    expect(scene.entities().size() == 5 && created.size() == 2 && scene.find(created[0]) && scene.find(created[1]),
+           "duplicar varias entidades");
+    history.undo(scene);
+    expect(scene.entities().size() == 3, "deshacer el duplicado multiple");
+
+    const std::vector<ge3d::Entity> clipboard{scene.entities()[1]};
+    created.clear();
+    history.execute(scene, ge3d::makePasteCommand(scene, clipboard, &created));
+    expect(scene.entities().size() == 4 && scene.find(created[0])->uuid != clipboard[0].uuid &&
+               scene.find(created[0])->name == clipboard[0].name,
+           "pegar crea una copia con identidad nueva");
+
+    const auto last = scene.entities().back().id;
+    history.execute(scene, *ge3d::makeMoveCommand(scene, last, 0));
+    expect(scene.entities().front().id == last, "reordenar mueve la entidad en la lista");
+    history.undo(scene);
+    expect(scene.entities().back().id == last, "deshacer el reordenado");
+
+    auto before = std::vector<ge3d::Entity>{scene.entities()[0], scene.entities()[1]};
+    scene.find(before[0].id)->transform.position.x += 3;
+    scene.find(before[1].id)->active = false;
+    history.record(*ge3d::makeModifyCommand(scene, before, "Mover dos"));
+    history.undo(scene);
+    expect(scene.find(before[0].id)->transform.position.x == before[0].transform.position.x && scene.find(before[1].id)->active,
+           "modificar varias entidades se deshace de una vez");
+
+    ge3d::Scene saved;
+    auto hidden = saved.makeEntity("Oculta", ge3d::Primitive::box);
+    hidden.active = false;
+    saved.add(std::move(hidden));
+    expect(!ge3d::parseScene(ge3d::serializeScene(saved)).entities().front().active, "una entidad inactiva se guarda asi");
+}
+
+// Jerarquía padre/hijo: transformaciones, guardado, duplicar y borrar con los hijos.
+void testHierarchy() {
+    ge3d::Scene scene;
+    auto parent = scene.makeEntity("Padre", {{10, 0, 0}, {0, 90, 0}, {2, 2, 2}});
+    const auto parentId = scene.add(parent);
+    auto child = scene.makeEntity("Hijo", ge3d::Primitive::box, {{1, 0, 0}, {}, {1, 1, 1}});
+    child.parent = parentId;
+    const auto childId = scene.add(child);
+    auto grandchild = scene.makeEntity("Nieto", ge3d::Primitive::box, {{0, 1, 0}, {}, {1, 1, 1}});
+    grandchild.parent = childId;
+    const auto grandchildId = scene.add(grandchild);
+
+    // El hijo está 1 m en +X local; el padre gira 90 grados en Y (+X pasa a -Z) y escala x2.
+    const auto world = ge3d::worldTransform(scene, *scene.find(childId));
+    expect(std::abs(world.position.x - 10) < 1e-4f && std::abs(world.position.z + 2) < 1e-4f, "posicion del hijo en el mundo");
+    expect(std::abs(world.rotationDegrees.y - 90) < 1e-3f && std::abs(world.scale.x - 2) < 1e-5f, "rotacion y escala heredadas");
+    const auto back = ge3d::localTransform(scene, parentId, world);
+    expect(std::abs(back.position.x - 1) < 1e-4f && std::abs(back.position.z) < 1e-4f && std::abs(back.scale.x - 1) < 1e-5f,
+           "del mundo a local devuelve la transformacion original");
+    expect(ge3d::isAncestor(scene, parentId, grandchildId) && !ge3d::isAncestor(scene, grandchildId, parentId), "ancestros");
+    expect(ge3d::descendantsOf(scene, parentId).size() == 2, "descendencia completa");
+    scene.find(parentId)->active = false;
+    expect(!ge3d::activeInHierarchy(scene, *scene.find(grandchildId)), "desactivar el padre desactiva a los hijos");
+    scene.find(parentId)->active = true;
+
+    // Guardado: el padre se guarda por UUID y se recupera aunque venga después en el archivo.
+    auto loaded = ge3d::parseScene(ge3d::serializeScene(scene));
+    const auto* loadedChild = &loaded.entities()[1];
+    expect(loadedChild->parent == loaded.entities()[0].id && loaded.entities()[2].parent == loadedChild->id, "el padre se guarda");
+    expect(throwsFormatError([] {
+               (void)ge3d::parseScene(R"({"format":"ge3d.scene","version":7,"entities":[{"uuid":"11111111-1111-4111-8111-111111111111",)"
+                                      R"("name":"A","parent":"22222222-2222-4222-8222-222222222222","transform":{"position":[0,0,0],)"
+                                      R"("rotationDegrees":[0,0,0],"scale":[1,1,1]}}]})");
+           }),
+           "un padre inexistente se rechaza");
+
+    // Duplicar el padre duplica a los hijos, colgando de la copia; borrar el padre borra a los hijos.
+    ge3d::History history;
+    std::vector<ge3d::EntityId> created;
+    history.execute(scene, *ge3d::makeDuplicateCommand(scene, {parentId}, {0, 0, 0}, &created));
+    expect(scene.entities().size() == 6 && created.size() == 1, "duplicar copia la descendencia");
+    const auto copiedChildren = ge3d::descendantsOf(scene, created[0]);
+    expect(copiedChildren.size() == 2 && scene.find(copiedChildren[0])->parent == created[0], "los hijos copiados cuelgan de la copia");
+    history.undo(scene);
+    history.execute(scene, *ge3d::makeDeleteCommand(scene, {parentId}));
+    expect(scene.entities().empty(), "borrar el padre borra a los hijos");
+    history.undo(scene);
+    expect(scene.entities().size() == 3 && scene.find(grandchildId)->parent == childId, "deshacer recupera la jerarquia");
+}
+
+// Prefabs: instanciar, propagar cambios respetando lo modificado en cada instancia, añadir, quitar y revertir.
+void testPrefabs() {
+    ge3d::Scene scene;
+    auto lamp = scene.makeEntity("Farol", ge3d::Primitive::box, {{5, 0, 5}, {}, {0.3f, 3, 0.3f}});
+    const auto lampId = scene.add(lamp);
+    auto light = scene.makeEntity("Luz", ge3d::Primitive::box, {{0, 1.6f, 0}, {}, {1, 0.2f, 1}});
+    light.parent = lampId;
+    scene.add(light);
+
+    std::map<ge3d::EntityId, ge3d::Uuid> mapping;
+    auto prefab = ge3d::makePrefabContent(scene, lampId, &mapping);
+    expect(prefab.entities().size() == 2 && ge3d::prefabRoot(prefab) && ge3d::prefabRoot(prefab)->name == "Farol", "contenido del prefab");
+    expect(ge3d::prefabRoot(prefab)->transform.position == ge3d::Vec3{}, "la raiz del prefab queda en el origen");
+    // El formato de prefab es el de una escena.
+    prefab = ge3d::parseScene(ge3d::serializeScene(prefab));
+
+    ge3d::Scene level;
+    ge3d::History history;
+    ge3d::EntityId a{}, b{};
+    history.execute(level, ge3d::makeInstantiateCommand(level, prefab, "prefabs/farol.prefab.json", {{1, 0, 0}, {}, {0.3f, 3, 0.3f}}, 0, &a));
+    history.execute(level, ge3d::makeInstantiateCommand(level, prefab, "prefabs/farol.prefab.json", {{9, 0, 0}, {}, {0.3f, 3, 0.3f}}, 0, &b));
+    expect(level.entities().size() == 4 && ge3d::descendantsOf(level, a).size() == 1, "dos instancias con su hijo");
+    expect(ge3d::prefabInstanceRoot(level, ge3d::descendantsOf(level, b)[0]) == b, "raiz de la instancia");
+
+    // La instancia B cambia el material de su luz: es un override.
+    const auto lightB = ge3d::descendantsOf(level, b)[0];
+    level.find(lightB)->shape->materials.fill("ladrillo");
+    ge3d::refreshPrefabOverrides(level, "prefabs/farol.prefab.json", prefab);
+    const auto& overrides = level.find(lightB)->prefab->overrides;
+    expect(overrides.size() == 1 && overrides[0] == "shape", "un cambio en la instancia queda como override");
+    expect(level.find(b)->prefab->overrides.empty(), "mover la raiz no es un override");
+
+    // El prefab cambia: nombre de la luz, material y un hijo nuevo.
+    auto updated = prefab;
+    auto* prefabLight = updated.find(updated.entities()[1].id);
+    prefabLight->name = "Bombilla";
+    prefabLight->shape->materials.fill("yeso");
+    auto extra = updated.makeEntity("Cartel", ge3d::Primitive::box);
+    extra.parent = ge3d::prefabRoot(updated)->id;
+    updated.add(extra);
+    auto sync = ge3d::makePrefabSyncCommand(level, "prefabs/farol.prefab.json", updated);
+    expect(sync.has_value(), "actualizar el prefab genera cambios");
+    history.execute(level, *sync);
+    const auto lightA = ge3d::descendantsOf(level, a)[0];
+    expect(level.find(lightA)->name == "Bombilla" && level.find(lightA)->shape->materials[0] == "yeso", "la instancia A recibe los cambios");
+    expect(level.find(lightB)->name == "Bombilla" && level.find(lightB)->shape->materials[0] == "ladrillo",
+           "la instancia B conserva su override y recibe el resto");
+    expect(ge3d::descendantsOf(level, a).size() == 2 && ge3d::descendantsOf(level, b).size() == 2, "el hijo nuevo aparece en las instancias");
+    expect(level.find(a)->transform.position.x == 1 && level.find(b)->transform.position.x == 9, "cada instancia conserva su sitio");
+
+    // Revertir el override de B.
+    history.execute(level, *ge3d::makeRevertCommand(level, lightB, updated, "shape"));
+    expect(level.find(lightB)->shape->materials[0] == "yeso" && level.find(lightB)->prefab->overrides.empty(), "revertir al prefab");
+
+    // Aplicar: el contenido sale de la instancia con los mismos UUID del prefab.
+    level.find(lightA)->name = "Luz grande";
+    std::map<ge3d::EntityId, ge3d::Uuid> links;
+    const auto applied = ge3d::prefabFromInstance(level, a, &links);
+    expect(applied.entities().size() == 3 && links.empty() && applied.entities()[1].name == "Luz grande" &&
+               applied.entities()[1].uuid == level.find(lightA)->prefab->source,
+           "aplicar la instancia conserva las identidades del prefab");
+
+    // Quitar del prefab el cartel lo quita de las instancias; deshacer lo devuelve.
+    auto smaller = updated;
+    smaller.remove(smaller.entities().back().id);
+    history.execute(level, *ge3d::makePrefabSyncCommand(level, "prefabs/farol.prefab.json", smaller));
+    expect(ge3d::descendantsOf(level, a).size() == 1, "lo que el prefab quita desaparece de las instancias");
+    history.undo(level);
+    expect(ge3d::descendantsOf(level, a).size() == 2, "deshacer la actualizacion");
+    const auto reloaded = ge3d::parseScene(ge3d::serializeScene(level));
+    expect(reloaded.entities().front().prefab && reloaded.entities().front().prefab->asset == "prefabs/farol.prefab.json",
+           "el enlace al prefab se guarda");
+}
+
+// Modelos glTF: importación, orientación, colores, texturas y errores.
+void testModels() {
+    const std::string content = GE3D_CONTENT_DIR;
+    const auto villager = ge3d::loadModel(content + "/models/aldeano.gltf");
+    expect(villager.triangleCount() > 50 && villager.parts.size() == 1, "el aldeano se importa");
+    expect(std::abs(villager.boundsMin.y) < 1e-4f && villager.boundsMax.y > 1.6f && villager.boundsMax.y < 1.8f,
+           "pies en y = 0 y 1,7 m de alto");
+    // Los ojos (color casi negro) estaban en +Z en glTF: tras importar quedan delante, en -Z.
+    bool eyesInFront = false;
+    for (const auto& vertex : villager.vertices) {
+        if ((vertex.color & 0xFFu) < 0x30u && vertex.position[1] > 1.4f) eyesInFront = eyesInFront || vertex.position[2] < -0.1f;
+    }
+    expect(eyesInFront, "el modelo mira hacia delante (-Z)");
+    const auto barrel = ge3d::loadModel(content + "/models/barril.gltf");
+    expect(barrel.textures.size() == 1 && barrel.textures[0].width == 16 && barrel.materials[0].texture == 0, "textura incrustada");
+
+    namespace fs = std::filesystem;
+    const auto broken = fs::temp_directory_path() / "ge3d_roto.gltf";
+    { std::ofstream(broken) << "{ esto no es json"; }
+    bool failed = false;
+    try {
+        (void)ge3d::loadModel(broken);
+    } catch (const std::runtime_error& error) {
+        failed = std::string(error.what()).find("ge3d_roto.gltf") != std::string::npos;
+    }
+    expect(failed, "un glTF roto da un error con su nombre");
+    fs::remove(broken);
+
+    ge3d::ModelLibrary library(content);
+    const auto shared = library.get("models/arbol.gltf");
+    expect(shared && library.get("models/arbol.gltf") == shared, "la biblioteca comparte el modelo cargado");
+    expect(!library.get("models/no_existe.gltf") && !library.lastError("models/no_existe.gltf").empty(), "modelo inexistente");
+    expect(!ge3d::isValidModelPath("../fuera.gltf") && ge3d::isValidModelPath("models/a.glb"), "rutas de modelo");
+
+    ge3d::Scene scene;
+    auto entity = scene.makeEntity("Casa");
+    entity.model = ge3d::ModelComponent{"models/casita.gltf", ge3d::ColliderShape::box};
+    scene.add(std::move(entity));
+    const auto loaded = ge3d::parseScene(ge3d::serializeScene(scene));
+    expect(loaded.entities()[0].model && loaded.entities()[0].model->collider == ge3d::ColliderShape::box, "el componente Modelo se guarda");
+
+    // Cámara del jugador: tercera persona por defecto; primera persona y distancia se guardan.
+    ge3d::Scene players;
+    auto player = players.makeEntity("Jugador");
+    player.player = ge3d::PlayerComponent{};
+    expect(player.player->camera == ge3d::PlayerCamera::thirdPerson, "el jugador empieza en tercera persona");
+    player.player->camera = ge3d::PlayerCamera::firstPerson;
+    player.player->cameraDistance = 6.5f;
+    players.add(std::move(player));
+    const auto reloaded = ge3d::parseScene(ge3d::serializeScene(players));
+    const auto& saved = reloaded.entities()[0].player;
+    expect(saved && saved->camera == ge3d::PlayerCamera::firstPerson && saved->cameraDistance == 6.5f, "la camara del jugador se guarda");
+}
+
 void testFiles() {
     namespace fs = std::filesystem;
     const auto folder = fs::temp_directory_path() / ("ge3d_tests_" + ge3d::Uuid::generate().toString());
@@ -543,6 +772,10 @@ int main() {
     testStarterGeometry();
     testUuid();
     testHistory();
+    testMultiCommands();
+    testHierarchy();
+    testPrefabs();
+    testModels();
     testSerialization();
     testVoxels();
     testTerrainHistory();

@@ -2,6 +2,7 @@
 
 #include "ge3d/Scene.hpp"
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -34,11 +35,45 @@ struct ScriptInfo {
 // Compila el script y ejecuta solo su cuerpo (en una VM temporal y aislada) para leer sus parámetros.
 [[nodiscard]] ScriptInfo describeScript(const std::string& source, const std::string& path);
 
-// Teclas de este fotograma para input.isDown / input.wasPressed ("E", "Space", "Left"...).
+// Teclas de este fotograma para input.isDown / input.wasPressed ("E", "Space", "Left"...) y lo que la
+// interfaz (ui.*) necesita: tamaño de la pantalla y ratón, en píxeles de la escena.
 struct ScriptInput {
     std::vector<std::string> down;
     std::vector<std::string> pressed;
+    float uiWidth{320.0f};
+    float uiHeight{180.0f};
+    float mouseX{-1.0f};          // < 0: el ratón no está sobre la pantalla del juego (o está capturado)
+    float mouseY{-1.0f};
+    bool mouseDown{};
+    bool mousePressed{};
 };
+
+// Interfaz de los scripts (ui.*): órdenes de dibujo inmediatas que cada script repite en su onUpdate.
+// Las unidades son píxeles de la escena pixel art (ui.width() x ui.height()), así la interfaz encaja con
+// la rejilla de la imagen. El texto usa una fuente de píxeles monoespaciada de 7 x 13 por carácter
+// (escala entera: 2 = 14 x 26).
+inline constexpr float uiGlyphWidth = 7.0f;
+inline constexpr float uiLineHeight = 13.0f;
+
+struct UiCommand {
+    enum class Kind { rect, panel, text, bar, button };
+    Kind kind{Kind::rect};
+    float x{};
+    float y{};
+    float w{};
+    float h{};
+    std::uint32_t color{0xFFFFFFFFu};     // 0xAABBGGRR (texto, relleno o barra)
+    std::uint32_t background{0u};         // barra: fondo; panel y botón: borde
+    float value{};                        // barra: 0..1
+    int scale{1};                         // texto: tamaño entero de la fuente
+    int state{};                          // botón: 0 normal, 1 ratón encima, 2 pulsado
+    std::string text;                     // texto (puede tener saltos de línea)
+};
+
+// Ancho en píxeles de un texto (la línea más larga) con la fuente de la interfaz.
+[[nodiscard]] float uiTextWidth(const std::string& text, int scale = 1);
+// Parte un texto en líneas de como mucho maxWidth píxeles, por palabras.
+[[nodiscard]] std::string uiWrap(const std::string& text, float maxWidth, int scale = 1);
 
 // Servicios del motor que los scripts pueden usar (física y audio). Los pone quien ejecuta Play;
 // sin ellos, esas funciones no hacen nada.
@@ -49,6 +84,10 @@ struct ScriptServices {
     std::function<void(const std::string& clip, float volume, std::optional<Vec3> position)> playSound;
     std::function<void(EntityId, bool play)> emitter;
     std::function<EntityId()> player;
+    // Crea una instancia de un prefab (ruta en Content) en esa posición y devuelve su raíz (0 si falla).
+    std::function<EntityId(const std::string& prefab, Vec3 position)> spawn;
+    // Quita la entidad y sus hijos de la escena de Play.
+    std::function<void(EntityId)> destroy;
 };
 
 // Ejecuta los ScriptComponent de una escena en modo Play.
@@ -95,6 +134,10 @@ public:
     void setParameter(EntityId entity, const std::string& name, const ScriptValue& value);
 
     [[nodiscard]] bool running() const noexcept;
+    // Interfaz dibujada por los scripts (la de cada uno se rehace en su onUpdate), en orden de dibujo.
+    [[nodiscard]] std::vector<UiCommand> uiCommands() const;
+    // ui.cursor(true): el juego quiere el puntero libre (menús, diálogos); false, que el ratón mire.
+    [[nodiscard]] bool wantsCursor() const noexcept;
     struct Stats {
         int instances{};
         int disabled{};

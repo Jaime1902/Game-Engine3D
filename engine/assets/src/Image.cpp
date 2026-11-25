@@ -8,6 +8,7 @@
 // Implementación de stb (dominio público / MIT) solo en esta unidad de compilación.
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_PNG
+#define STBI_ONLY_JPEG
 #define STBI_NO_STDIO
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #define STBI_WRITE_NO_STDIO
@@ -24,6 +25,15 @@ Image loadPng(const std::filesystem::path& path) {
     int width = 0, height = 0, channels = 0;
     stbi_uc* pixels = stbi_load_from_memory(bytes.data(), static_cast<int>(bytes.size()), &width, &height, &channels, 4);
     if (!pixels) throw std::runtime_error("PNG invalido " + pathToUtf8(path) + ": " + stbi_failure_reason());
+    Image image{width, height, {pixels, pixels + static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4}};
+    stbi_image_free(pixels);
+    return image;
+}
+
+Image decodeImage(const std::uint8_t* data, std::size_t size) {
+    int width = 0, height = 0, channels = 0;
+    stbi_uc* pixels = stbi_load_from_memory(data, static_cast<int>(size), &width, &height, &channels, 4);
+    if (!pixels) throw std::runtime_error(std::string("imagen invalida: ") + stbi_failure_reason());
     Image image{width, height, {pixels, pixels + static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4}};
     stbi_image_free(pixels);
     return image;

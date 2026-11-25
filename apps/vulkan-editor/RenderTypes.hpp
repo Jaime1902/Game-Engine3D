@@ -21,6 +21,7 @@ inline constexpr float modePiece = 2.0f;
 inline constexpr float modeVoxel = 3.0f;
 inline constexpr float modeHeightmap = 4.0f;
 inline constexpr float modeWater = 5.0f;
+inline constexpr float modeModel = 6.0f;
 inline constexpr VkShaderStageFlags pushStages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
 // Debe coincidir con FrameData en shaders/scene.slang.

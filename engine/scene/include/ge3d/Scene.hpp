@@ -118,6 +118,9 @@ struct AudioSourceComponent {
 };
 
 // Jugador en primera persona: en Play aparece donde está la entidad y la cámara pasa a sus ojos.
+// Cámara del jugador en Play: tercera persona (detrás, orbitando con el ratón) o primera persona (ojos).
+enum class PlayerCamera { thirdPerson, firstPerson };
+
 struct PlayerComponent {
     float height{1.75f};
     float radius{0.3f};
@@ -125,18 +128,48 @@ struct PlayerComponent {
     float runSpeed{7.0f};
     float jumpSpeed{5.0f};
     float mouseSensitivity{0.12f};
+    PlayerCamera camera{PlayerCamera::thirdPerson};
+    float cameraDistance{4.0f};     // tercera persona: metros detrás de la cabeza (la rueda del ratón lo cambia)
     friend bool operator==(const PlayerComponent&, const PlayerComponent&) = default;
+};
+
+// Modelo 3D importado (glTF/GLB de Content, p. ej. "models/aldeano.gltf"). El colisionador puede ser la
+// caja que lo envuelve, la malla exacta (si es estático; con Cuerpo físico dinámico se usa su envolvente
+// convexa) o ninguno (decoración).
+enum class ColliderShape { none, box, mesh };
+
+struct ModelComponent {
+    std::string path;
+    ColliderShape collider{ColliderShape::mesh};
+    friend bool operator==(const ModelComponent&, const ModelComponent&) = default;
 };
 
 // Ruta de sonido válida: relativa, sin "..", .wav.
 [[nodiscard]] bool isValidSoundPath(const std::string& path);
 
+// Instancia de un prefab: de qué archivo viene esta entidad y a qué entidad del prefab corresponde.
+// overrides lista los componentes que la instancia cambió respecto al prefab ("name", "transform",
+// "shape", "script"...): al actualizar el prefab, esos se conservan y el resto se sustituye.
+struct PrefabLink {
+    std::string asset;          // ruta en Content, p. ej. "prefabs/farol.prefab.json"
+    Uuid source{};              // UUID de la entidad dentro del prefab
+    std::vector<std::string> overrides;
+    friend bool operator==(const PrefabLink&, const PrefabLink&) = default;
+};
+
 struct Entity {
     EntityId id{};
     Uuid uuid{};
     std::string name;
+    // Inactiva: se queda en la escena pero no se dibuja, no choca, no suena y sus scripts no corren.
+    // Desactivar un padre desactiva también a sus hijos.
+    bool active{true};
+    // Padre en la jerarquía (0 = en la raíz). transform es relativa al padre.
+    EntityId parent{};
     Transform transform{};
+    std::optional<PrefabLink> prefab;
     std::optional<ShapeComponent> shape;
+    std::optional<ModelComponent> model;
     std::optional<TerrainComponent> terrain;
     std::optional<HeightmapComponent> heightmap;
     std::optional<ScriptComponent> script;
@@ -173,5 +206,22 @@ private:
 };
 
 [[nodiscard]] Scene makeStarterScene();
+
+// --- Jerarquía padre/hijo -------------------------------------------------------------------------
+// La transformación de una entidad es local a su padre. La del mundo combina la cadena de padres
+// (posición rotada y escalada, rotaciones compuestas, escalas multiplicadas por eje: no hay cizalla).
+[[nodiscard]] Transform worldTransform(const Scene& scene, const Entity& entity);
+// Transformación local que deja a la entidad en world si su padre es parent (0 = raíz).
+[[nodiscard]] Transform localTransform(const Scene& scene, EntityId parent, const Transform& world);
+// Activa ella y todos sus padres.
+[[nodiscard]] bool activeInHierarchy(const Scene& scene, const Entity& entity);
+// Hijos directos en el orden de la escena.
+[[nodiscard]] std::vector<EntityId> childrenOf(const Scene& scene, EntityId parent);
+// Toda la descendencia (sin la propia entidad), padres antes que hijos.
+[[nodiscard]] std::vector<EntityId> descendantsOf(const Scene& scene, EntityId root);
+// true si ancestor está en la cadena de padres de entity.
+[[nodiscard]] bool isAncestor(const Scene& scene, EntityId ancestor, EntityId entity);
+// Rotación en grados (convención del editor) compuesta: primero b, después a.
+[[nodiscard]] Vec3 composeRotations(Vec3 aDegrees, Vec3 bDegrees);
 
 }

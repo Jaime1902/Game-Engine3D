@@ -3,3 +3,5 @@
 /projects/*/.cache/
 CMakeUserPresets.json
 .vs/
+# Preferencias del editor por usuario (distribucion, recientes, camara)
+/projects/*/UserSettings/

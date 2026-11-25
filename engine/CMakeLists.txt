@@ -17,6 +17,15 @@ FetchContent_Declare(stb
 )
 FetchContent_MakeAvailable(stb)
 
+# cgltf v1.14 (MIT) para importar modelos glTF/GLB. Un solo archivo; se compila en Model.cpp.
+FetchContent_Declare(cgltf
+    GIT_REPOSITORY https://github.com/jkuhlmann/cgltf.git
+    GIT_TAG v1.14
+    GIT_SHALLOW TRUE
+    SOURCE_SUBDIR unused
+)
+FetchContent_MakeAvailable(cgltf)
+
 add_library(ge3d_runtime STATIC
     scene/src/Scene.cpp
     scene/src/Uuid.cpp
@@ -24,9 +33,11 @@ add_library(ge3d_runtime STATIC
     terrain/src/Voxel.cpp
     terrain/src/Heightmap.cpp
     editing/src/History.cpp
+    editing/src/Prefab.cpp
     serialization/src/SceneIO.cpp
     assets/src/Materials.cpp
     assets/src/Image.cpp
+    assets/src/Model.cpp
 )
 add_library(ge3d::runtime ALIAS ge3d_runtime)
 target_link_libraries(ge3d_runtime
@@ -41,10 +52,10 @@ target_include_directories(ge3d_runtime PUBLIC
     serialization/include
     assets/include
 )
-target_include_directories(ge3d_runtime SYSTEM PRIVATE "${stb_SOURCE_DIR}")
+target_include_directories(ge3d_runtime SYSTEM PRIVATE "${stb_SOURCE_DIR}" "${cgltf_SOURCE_DIR}")
 # Generación y mallado de vóxeles son bucles muy calientes: con GCC/Clang se optimizan también en
 # Debug para que el editor de desarrollo no sea 6 veces más lento al cargar o esculpir terrenos.
-set_source_files_properties(terrain/src/Voxel.cpp terrain/src/Heightmap.cpp PROPERTIES
+set_source_files_properties(terrain/src/Voxel.cpp terrain/src/Heightmap.cpp assets/src/Model.cpp PROPERTIES
     COMPILE_OPTIONS "$<$<AND:$<CONFIG:Debug>,$<NOT:$<CXX_COMPILER_ID:MSVC>>>:-O2>")
 # Image.cpp solo contiene la implementación de stb (código externo): sin avisos.
 set_source_files_properties(assets/src/Image.cpp PROPERTIES

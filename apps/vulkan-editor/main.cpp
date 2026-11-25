@@ -5,6 +5,7 @@
 #include "EditorView.hpp"
 #include "MaterialTextures.hpp"
 #include "RenderTypes.hpp"
+#include "ModelRenderer.hpp"
 #include "TerrainRenderer.hpp"
 #include "ge3d/Materials.hpp"
 #include "ge3d/Primitives.hpp"
@@ -275,13 +276,14 @@ void createBuffer(VmaAllocator allocator, VkDeviceSize size, VkBufferUsageFlags 
 
 // Pipelines de la escena: piezas (triángulos), cuadrícula (líneas), vóxeles (vértice compacto),
 // terreno de malla y la pasada de estilo pixel art (triángulo a pantalla completa, sin vértices).
-enum class PipelineKind { piece, grid, voxel, height, water, post };
+enum class PipelineKind { piece, grid, voxel, height, water, model, post };
 
 VkPipeline createScenePipeline(VkDevice device, VkPipelineLayout layout, PipelineKind kind) {
     const bool post = kind == PipelineKind::post;
     const char* vertexName = kind == PipelineKind::voxel ? "scene.voxel.spv"
                            : kind == PipelineKind::height ? "scene.height.spv"
                            : kind == PipelineKind::water ? "scene.water.spv"
+                           : kind == PipelineKind::model ? "scene.model.spv"
                            : post ? "post.vertex.spv" : "scene.vertex.spv";
     VkShaderModule vertex = createShaderModule(device, vertexName);
     VkShaderModule fragment = VK_NULL_HANDLE;
@@ -301,6 +303,7 @@ VkPipeline createScenePipeline(VkDevice device, VkPipelineLayout layout, Pipelin
         const std::uint32_t stride = kind == PipelineKind::voxel ? static_cast<std::uint32_t>(sizeof(ge3d::VoxelVertex))
                                    : kind == PipelineKind::height ? static_cast<std::uint32_t>(sizeof(ge3d::HeightVertex))
                                    : kind == PipelineKind::water ? static_cast<std::uint32_t>(sizeof(ge3d::WaterVertex))
+                                   : kind == PipelineKind::model ? static_cast<std::uint32_t>(sizeof(ge3d::ModelVertex))
                                    : static_cast<std::uint32_t>(sizeof(Vertex));
         const VkVertexInputBindingDescription binding{0, stride, VK_VERTEX_INPUT_RATE_VERTEX};
         const VkVertexInputAttributeDescription attributes[] = {
@@ -321,14 +324,22 @@ VkPipeline createScenePipeline(VkDevice device, VkPipelineLayout layout, Pipelin
             {2, 0, VK_FORMAT_R32_UINT, offsetof(ge3d::WaterVertex, normal)},
             {3, 0, VK_FORMAT_R32_UINT, offsetof(ge3d::WaterVertex, cell)}
         };
+        const VkVertexInputAttributeDescription modelAttributes[] = {
+            {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(ge3d::ModelVertex, position)},
+            {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(ge3d::ModelVertex, normal)},
+            {2, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(ge3d::ModelVertex, uv)},
+            {3, 0, VK_FORMAT_R8G8B8A8_UNORM, offsetof(ge3d::ModelVertex, color)}
+        };
         if (!post) {
             vertexInput.vertexBindingDescriptionCount = 1;
             vertexInput.pVertexBindingDescriptions = &binding;
             vertexInput.vertexAttributeDescriptionCount = kind == PipelineKind::voxel ? 1
-                                                        : (kind == PipelineKind::height || kind == PipelineKind::water) ? 4 : 3;
+                                                        : (kind == PipelineKind::height || kind == PipelineKind::water ||
+                                                           kind == PipelineKind::model) ? 4 : 3;
             vertexInput.pVertexAttributeDescriptions = kind == PipelineKind::voxel ? &voxelAttribute
                                                      : kind == PipelineKind::height ? heightAttributes
-                                                     : kind == PipelineKind::water ? waterAttributes : attributes;
+                                                     : kind == PipelineKind::water ? waterAttributes
+                                                     : kind == PipelineKind::model ? modelAttributes : attributes;
         }
         VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
         assembly.topology = kind == PipelineKind::grid ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -457,6 +468,7 @@ void run(const std::filesystem::path& initialScene) {
     VkPipeline voxelPipeline = VK_NULL_HANDLE;
     VkPipeline heightPipeline = VK_NULL_HANDLE;
     VkPipeline waterPipeline = VK_NULL_HANDLE;
+    VkPipeline modelPipeline = VK_NULL_HANDLE;
     VkPipeline postPipeline = VK_NULL_HANDLE;
     VkPipelineLayout postLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout postSetLayout = VK_NULL_HANDLE;
@@ -469,6 +481,8 @@ void run(const std::filesystem::path& initialScene) {
     MaterialTextures textures;
     TerrainRenderer terrainRenderer;
     bool terrainReady = false;
+    ModelRenderer modelRenderer;
+    bool modelsReady = false;
     Buffer vertices, indices, staging;
     VkSampler sceneSampler{};
     VkDescriptorSet sceneTextures[2]{};
@@ -513,12 +527,14 @@ void run(const std::filesystem::path& initialScene) {
             if (uiRenderer) ImGui_ImplVulkan_Shutdown();
             textures.destroy();
             if (terrainReady) terrainRenderer.destroy();
+            if (modelsReady) modelRenderer.destroy();
             for (auto& uniforms : frameUniforms) destroyGpuBuffer(allocator, uniforms);
             if (scenePool) vkDestroyDescriptorPool(device, scenePool, nullptr);
             if (sceneSetLayout) vkDestroyDescriptorSetLayout(device, sceneSetLayout, nullptr);
             if (voxelPipeline) vkDestroyPipeline(device, voxelPipeline, nullptr);
             if (heightPipeline) vkDestroyPipeline(device, heightPipeline, nullptr);
             if (waterPipeline) vkDestroyPipeline(device, waterPipeline, nullptr);
+            if (modelPipeline) vkDestroyPipeline(device, modelPipeline, nullptr);
             if (postPipeline) vkDestroyPipeline(device, postPipeline, nullptr);
             if (postLayout) vkDestroyPipelineLayout(device, postLayout, nullptr);
             if (postPool) vkDestroyDescriptorPool(device, postPool, nullptr);
@@ -666,9 +682,10 @@ void run(const std::filesystem::path& initialScene) {
         const VkDescriptorSetLayoutBinding sceneBindings[] = {
             {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
             {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            {2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},   // texturas de modelos
         };
         VkDescriptorSetLayoutCreateInfo setLayoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        setLayoutInfo.bindingCount = 2;
+        setLayoutInfo.bindingCount = 3;
         setLayoutInfo.pBindings = sceneBindings;
         check(vkCreateDescriptorSetLayout(device, &setLayoutInfo, nullptr, &sceneSetLayout), "Create scene set layout");
         VkPushConstantRange pushRange{pushStages, 0, sizeof(ScenePush)};
@@ -683,6 +700,7 @@ void run(const std::filesystem::path& initialScene) {
         voxelPipeline = createScenePipeline(device, pipelineLayout, PipelineKind::voxel);
         heightPipeline = createScenePipeline(device, pipelineLayout, PipelineKind::height);
         waterPipeline = createScenePipeline(device, pipelineLayout, PipelineKind::water);
+        modelPipeline = createScenePipeline(device, pipelineLayout, PipelineKind::model);
 
         // Pasada de estilo: lee color, normal y profundidad de la escena.
         VkDescriptorSetLayoutBinding postBindings[3]{};
@@ -716,7 +734,7 @@ void run(const std::filesystem::path& initialScene) {
 
         const VkDescriptorPoolSize poolSizes[] = {
             {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2},
-            {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2},
+            {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4},
         };
         VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         poolInfo.maxSets = 2;
@@ -935,7 +953,9 @@ void run(const std::filesystem::path& initialScene) {
             for (int i = 0; i < 2; ++i) {
                 const VkDescriptorBufferInfo bufferInfo{frameUniforms[i].handle, 0, sizeof(FrameData)};
                 const VkDescriptorImageInfo imageInfo{textures.sampler(), textures.view(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-                VkWriteDescriptorSet writes[2]{};
+                const VkDescriptorImageInfo modelInfo{modelRenderer.sampler(), modelRenderer.textureView(),
+                                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+                VkWriteDescriptorSet writes[3]{};
                 writes[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
                 writes[0].dstSet = sceneSets[i];
                 writes[0].dstBinding = 0;
@@ -948,7 +968,10 @@ void run(const std::filesystem::path& initialScene) {
                 writes[1].descriptorCount = 1;
                 writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
                 writes[1].pImageInfo = &imageInfo;
-                vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
+                writes[2] = writes[1];
+                writes[2].dstBinding = 2;
+                writes[2].pImageInfo = &modelInfo;
+                vkUpdateDescriptorSets(device, 3, writes, 0, nullptr);
             }
         };
         const auto fileTime = [](const std::filesystem::path& path) {
@@ -989,6 +1012,8 @@ void run(const std::filesystem::path& initialScene) {
                 }
             }
         };
+        modelRenderer.init(gpu);
+        modelsReady = true;
         loadMaterials(true);
         terrainRenderer.init(gpu);
         terrainReady = true;
@@ -1144,6 +1169,9 @@ void run(const std::filesystem::path& initialScene) {
             const VkExtent2D sceneExtent{std::min(sceneView.extent.x, sceneCapacity.width),
                                          std::min(sceneView.extent.y, sceneCapacity.height)};
             const auto destination = images[imageIndex];
+            // Modelos nuevos o reimportados: se suben antes de grabar (si cambian las texturas, se espera a la
+            // GPU y se reescriben los descriptores).
+            if (modelRenderer.prepare(editor.scene(), editor.models())) writeSceneSets();
             check(vkResetCommandBuffer(command, 0), "Reset command buffer");
             VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
             check(vkBeginCommandBuffer(command, &begin), "Begin command buffer");
@@ -1214,28 +1242,35 @@ void run(const std::filesystem::path& initialScene) {
             vkCmdBindVertexBuffers(command, 0, 1, &vertices.handle, &vertexOffset);
             vkCmdBindIndexBuffer(command, indices.handle, 0, VK_INDEX_TYPE_UINT32);
             vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, cubePipeline);
+            const auto hidden = editor.hiddenEntity();
             for (const auto& entity : editor.scene().entities()) {
-                if (!entity.shape) continue;
+                if (!entity.shape || !ge3d::activeInHierarchy(editor.scene(), entity)) continue;
+                if (hidden && (entity.id == hidden || ge3d::isAncestor(editor.scene(), hidden, entity.id))) continue;
                 ScenePush push;
-                push.model = EditorView::modelMatrix(entity.transform);
+                push.model = EditorView::modelMatrix(ge3d::worldTransform(editor.scene(), entity));
                 push.grid.w = modePiece;
                 push.data = packFaceMaterials(*entity.shape, textures);
                 const auto mesh = entity.shape->primitive == ge3d::Primitive::box ? geometry.box : geometry.ramp;
                 vkCmdPushConstants(command, pipelineLayout, pushStages, 0, sizeof(push), &push);
                 vkCmdDrawIndexed(command, mesh.count, 1, mesh.firstIndex, 0, 0);
             }
+            // Modelos glTF.
+            vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, modelPipeline);
+            modelRenderer.draw(command, pipelineLayout, camera, editor.scene(), editor.models(),
+                               [&](const ge3d::Entity& entity) { return EditorView::modelMatrix(ge3d::worldTransform(editor.scene(), entity)); },
+                               hidden);
             // Terreno de vóxeles: chunks visibles desde la cámara.
             vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, voxelPipeline);
             terrainRenderer.draw(command, pipelineLayout, camera, editor.scene(),
-                                 [](const ge3d::Transform& transform) { return EditorView::modelMatrix(transform); });
+                                 [&](const ge3d::Entity& entity) { return EditorView::modelMatrix(ge3d::worldTransform(editor.scene(), entity)); });
             vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, heightPipeline);
             terrainRenderer.drawHeightmaps(command, pipelineLayout, camera, editor.scene(),
-                                           [](const ge3d::Transform& transform) { return EditorView::modelMatrix(transform); },
+                                           [&](const ge3d::Entity& entity) { return EditorView::modelMatrix(ge3d::worldTransform(editor.scene(), entity)); },
                                            [&](const std::string& id) { return textures.gpuIndex(id); });
             // Agua después de todo lo opaco: su tramado deja ver el fondo ya dibujado.
             vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, waterPipeline);
             terrainRenderer.drawWater(command, pipelineLayout, camera, editor.scene(),
-                                      [](const ge3d::Transform& transform) { return EditorView::modelMatrix(transform); },
+                                      [&](const ge3d::Entity& entity) { return EditorView::modelMatrix(ge3d::worldTransform(editor.scene(), entity)); },
                                       [&](const std::string& id) { return textures.gpuIndex(id); });
             const auto& terrainStats = terrainRenderer.stats();
             editor.setTerrainStats({terrainStats.terrains, terrainStats.chunks, terrainStats.visibleChunks,

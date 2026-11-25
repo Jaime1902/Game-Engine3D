@@ -8,6 +8,7 @@ Todas se descargan con `FetchContent` en la primera configuración y quedan fija
 | stb_image / stb_image_write | `6b5799b` | Dominio público o MIT | Leer y escribir texturas PNG (solo en `engine/assets/src/Image.cpp`) | `engine/CMakeLists.txt` |
 | Luau | 0.739 | MIT | VM y compilador de scripts (solo dentro de `ge3d_scripting`; el resto de Luau no se compila) | `engine/CMakeLists.txt` |
 | Jolt Physics | v5.3.0 | MIT | Cuerpos, colisiones, zonas, personaje y flotación (solo dentro de `ge3d_physics`) | `engine/CMakeLists.txt` |
+| cgltf | v1.14 | MIT | Leer modelos glTF 2.0 / GLB (solo en `engine/assets/src/Model.cpp`) | `engine/CMakeLists.txt` |
 | miniaudio | 0.11.23 | Dominio público o MIT-0 | Reproducción de WAV, emisores 3D (solo dentro de `ge3d_audio`) | `engine/CMakeLists.txt` |
 | GLFW | 3.4 | zlib | Ventana y entrada del editor Vulkan | `CMakeLists.txt` |
 | Dear ImGui (docking) | `52fe0a0` (1.91.9b) | MIT | Interfaz del editor | `apps/vulkan-editor/CMakeLists.txt` |

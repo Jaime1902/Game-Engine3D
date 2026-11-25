@@ -322,6 +322,17 @@ std::string serializeScene(const Scene& scene) {
         Json item = Json::object();
         item["uuid"] = entity.uuid.toString();
         item["name"] = entity.name;
+        if (!entity.active) item["active"] = false;
+        if (entity.parent) {
+            if (const auto* parent = scene.find(entity.parent)) item["parent"] = parent->uuid.toString();
+        }
+        if (entity.prefab) {
+            Json prefab = Json::object();
+            prefab["asset"] = entity.prefab->asset;
+            prefab["source"] = entity.prefab->source.toString();
+            prefab["overrides"] = entity.prefab->overrides;
+            item["prefab"] = std::move(prefab);
+        }
         Json transform = Json::object();
         transform["position"] = vector(entity.transform.position);
         transform["rotationDegrees"] = vector(entity.transform.rotationDegrees);
@@ -337,6 +348,12 @@ std::string serializeScene(const Scene& scene) {
         }
         if (entity.terrain) item["terrain"] = terrainJson(entity);
         if (entity.heightmap) item["heightmap"] = heightmapJson(entity);
+        if (entity.model) {
+            Json model = Json::object();
+            model["path"] = entity.model->path;
+            model["collider"] = entity.model->collider == ColliderShape::none ? "none" : entity.model->collider == ColliderShape::box ? "box" : "mesh";
+            item["model"] = std::move(model);
+        }
         if (entity.body) {
             Json body = Json::object();
             body["type"] = bodyTypeName(entity.body->type);
@@ -366,6 +383,8 @@ std::string serializeScene(const Scene& scene) {
             player["runSpeed"] = tidy(p.runSpeed);
             player["jumpSpeed"] = tidy(p.jumpSpeed);
             player["mouseSensitivity"] = tidy(p.mouseSensitivity);
+            player["camera"] = p.camera == PlayerCamera::firstPerson ? "first" : "third";
+            player["cameraDistance"] = tidy(p.cameraDistance);
             item["player"] = std::move(player);
         }
         if (entity.script) {
@@ -420,6 +439,7 @@ Scene parseSceneData(std::string_view text, bool generateTerrains) {
 
     Scene scene;
     std::set<Uuid> seen;
+    std::vector<std::pair<EntityId, Uuid>> parents;   // se resuelven al final: el padre puede venir después
     for (std::size_t i = 0; i < entities.size(); ++i) {
         const auto& item = entities[i];
         const std::string at = "Entidad " + std::to_string(i + 1);
@@ -431,6 +451,33 @@ Scene parseSceneData(std::string_view text, bool generateTerrains) {
         if (!seen.insert(*uuid).second) fail(at + ": UUID repetido " + uuid->toString());
         entity.uuid = *uuid;
         entity.name = readString(item, "name", at);
+        if (item.contains("active")) {
+            if (!item["active"].is_boolean()) fail(at + ": \"active\" debe ser true o false");
+            entity.active = item["active"].get<bool>();
+        }
+        std::optional<Uuid> parentUuid;
+        if (number >= 7 && item.contains("parent")) {
+            if (!item["parent"].is_string()) fail(at + ": \"parent\" debe ser un UUID");
+            parentUuid = Uuid::parse(item["parent"].get<std::string>());
+            if (!parentUuid || parentUuid->isNil()) fail(at + ": \"parent\" no es un UUID valido");
+        }
+        if (number >= 7 && item.contains("prefab")) {
+            const auto& link = item["prefab"];
+            const std::string linkAt = at + " (prefab)";
+            if (!link.is_object()) fail(linkAt + ": debe ser un objeto");
+            PrefabLink prefab;
+            prefab.asset = readString(link, "asset", linkAt);
+            const auto source = Uuid::parse(readString(link, "source", linkAt));
+            if (!source) fail(linkAt + ": \"source\" no es un UUID valido");
+            prefab.source = *source;
+            if (link.contains("overrides")) {
+                if (!link["overrides"].is_array()) fail(linkAt + ": \"overrides\" debe ser una lista");
+                for (const auto& name : link["overrides"]) {
+                    if (name.is_string()) prefab.overrides.push_back(name.get<std::string>());
+                }
+            }
+            entity.prefab = std::move(prefab);
+        }
 
         if (number <= 2) {
             // v1 y v2: pieza con transformación plana y colores de paleta (v2) o colores por defecto (v1).
@@ -481,6 +528,25 @@ Scene parseSceneData(std::string_view text, bool generateTerrains) {
                 const auto settings = readTerrainSettings(terrainJson, terrainAt);
                 entity.terrain = generateTerrains ? makeTerrain(settings) : TerrainComponent{settings, nullptr};
             }
+            if (number >= 8 && item.contains("model")) {
+                const auto& json = item["model"];
+                const std::string modelAt = at + " (modelo)";
+                if (!json.is_object()) fail(modelAt + ": debe ser un objeto");
+                ModelComponent model;
+                model.path = readString(json, "path", modelAt);
+                if (!model.path.empty()) {
+                    const auto& p = model.path;
+                    const bool valid = p.find("..") == std::string::npos && p.front() != '/' && p.front() != '\\' &&
+                                       p.find(':') == std::string::npos && (p.ends_with(".gltf") || p.ends_with(".glb"));
+                    if (!valid) fail(modelAt + ": ruta de modelo invalida \"" + p + "\"");
+                }
+                const auto collider = readString(json, "collider", modelAt);
+                if (collider == "none") model.collider = ColliderShape::none;
+                else if (collider == "box") model.collider = ColliderShape::box;
+                else if (collider == "mesh") model.collider = ColliderShape::mesh;
+                else fail(modelAt + ": colisionador desconocido \"" + collider + "\"");
+                entity.model = std::move(model);
+            }
             if (number >= 6 && item.contains("body")) {
                 const auto& json = item["body"];
                 const std::string bodyAt = at + " (cuerpo fisico)";
@@ -523,6 +589,16 @@ Scene parseSceneData(std::string_view text, bool generateTerrains) {
                 player.runSpeed = static_cast<float>(readNumber(json, "runSpeed", playerAt, 0, 100));
                 player.jumpSpeed = static_cast<float>(readNumber(json, "jumpSpeed", playerAt, 0, 100));
                 player.mouseSensitivity = static_cast<float>(readNumber(json, "mouseSensitivity", playerAt, 0.001, 10));
+                // Opcionales (añadidos después de la versión 6): por defecto, tercera persona a 4 m.
+                if (json.contains("camera")) {
+                    const auto camera = readString(json, "camera", playerAt);
+                    if (camera == "first") player.camera = PlayerCamera::firstPerson;
+                    else if (camera == "third") player.camera = PlayerCamera::thirdPerson;
+                    else fail(playerAt + ": camara desconocida \"" + camera + "\" (first o third)");
+                }
+                if (json.contains("cameraDistance")) {
+                    player.cameraDistance = static_cast<float>(readNumber(json, "cameraDistance", playerAt, 0.5, 50));
+                }
                 entity.player = player;
             }
             if (number >= 5 && item.contains("script")) {
@@ -553,7 +629,17 @@ Scene parseSceneData(std::string_view text, bool generateTerrains) {
                 entity.heightmap = generateTerrains ? makeHeightmap(settings) : HeightmapComponent{settings, nullptr};
             }
         }
-        scene.add(std::move(entity));
+        const auto id = scene.add(std::move(entity));
+        if (parentUuid) parents.emplace_back(id, *parentUuid);
+    }
+    for (const auto& [id, parentUuid] : parents) {
+        const auto& entities = scene.entities();
+        const auto it = std::find_if(entities.begin(), entities.end(), [&](const Entity& e) { return e.uuid == parentUuid; });
+        if (it == entities.end()) fail("Escena: el padre " + parentUuid.toString() + " no existe");
+        scene.find(id)->parent = it->id;
+    }
+    for (const auto& [id, parentUuid] : parents) {
+        if (isAncestor(scene, id, id)) fail("Escena: la jerarquia tiene un ciclo (" + scene.find(id)->name + ")");
     }
     return scene;
 }

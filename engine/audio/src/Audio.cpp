@@ -165,7 +165,7 @@ void AudioSystem::update(const Scene& scene, const Listener& listener) {
 
     for (auto& [id, emitter] : impl.emitters) emitter.seen = false;
     for (const auto& entity : scene.entities()) {
-        if (!entity.audio || entity.audio->clip.empty()) continue;
+        if (!entity.audio || entity.audio->clip.empty() || !activeInHierarchy(scene, entity)) continue;
         auto [it, created] = impl.emitters.try_emplace(entity.id);
         auto& emitter = it->second;
         emitter.seen = true;
@@ -183,7 +183,7 @@ void AudioSystem::update(const Scene& scene, const Listener& listener) {
             impl.configure(emitter, settings);   // volumen o distancias cambiados en el Inspector
         }
         if (emitter.sound && settings.spatial) {
-            const auto& p = entity.transform.position;
+            const auto p = worldTransform(scene, entity).position;
             ma_sound_set_position(emitter.sound.get(), p.x, p.y, p.z);
         }
     }

@@ -80,6 +80,21 @@ private:
 [[nodiscard]] EditCommand makeCreateCommand(const Scene& scene, Entity entity);
 [[nodiscard]] std::optional<EditCommand> makeDuplicateCommand(Scene& scene, EntityId id, Vec3 offset);
 [[nodiscard]] std::optional<EditCommand> makeDeleteCommand(const Scene& scene, EntityId id);
+// Varias entidades a la vez (selección múltiple): un solo paso de deshacer.
+[[nodiscard]] std::optional<EditCommand> makeDeleteCommand(const Scene& scene, const std::vector<EntityId>& ids);
+// Copias con identidad nueva de las entidades indicadas, colocadas tras la última. created recibe los ids nuevos.
+[[nodiscard]] std::optional<EditCommand> makeDuplicateCommand(Scene& scene, const std::vector<EntityId>& ids, Vec3 offset,
+                                                              std::vector<EntityId>* created = nullptr);
+// Inserta copias (con identidad nueva) de entidades guardadas, p. ej. del portapapeles.
+[[nodiscard]] EditCommand makePasteCommand(Scene& scene, const std::vector<Entity>& entities, std::vector<EntityId>* created = nullptr);
+// Cambia la posición de una entidad en la lista de la escena (orden de la Jerarquía).
+[[nodiscard]] std::optional<EditCommand> makeMoveCommand(const Scene& scene, EntityId id, std::size_t newIndex);
+// Cambia de padre (0 = raíz) las entidades indicadas conservando su posición en el mundo y las coloca
+// junto a anchor (antes o después; sin anchor, al final). Ignora las que crearían un ciclo.
+[[nodiscard]] std::optional<EditCommand> makeReparentCommand(const Scene& scene, const std::vector<EntityId>& ids, EntityId parent,
+                                                             EntityId anchor, bool after);
+// Varias modificaciones ya aplicadas (antes de cada entidad) como un solo paso.
+[[nodiscard]] std::optional<EditCommand> makeModifyCommand(const Scene& scene, const std::vector<Entity>& before, std::string label);
 // Compara "before" con el estado actual de la misma entidad en la escena.
 [[nodiscard]] std::optional<EditCommand> makeModifyCommand(const Scene& scene, const Entity& before, std::string label);
 

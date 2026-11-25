@@ -1,6 +1,6 @@
 {
   "format": "ge3d.scene",
-  "version": 6,
+  "version": 8,
   "entities": [
     {
       "uuid": "c0f39c03-10b9-4f85-9a5c-1692408ab4b2",
@@ -596,6 +596,170 @@
       }
     },
     {
+      "uuid": "7c7579f6-9d33-431b-802e-b8adaa132d0c",
+      "name": "Casita",
+      "transform": {
+        "position": [
+          6,
+          0,
+          -6
+        ],
+        "rotationDegrees": [
+          0,
+          -30,
+          0
+        ],
+        "scale": [
+          1,
+          1,
+          1
+        ]
+      },
+      "model": {
+        "path": "models/casita.gltf",
+        "collider": "mesh"
+      }
+    },
+    {
+      "uuid": "09738ca4-1f88-4a82-ac1b-7c6bd144e4d0",
+      "name": "Arbol 1",
+      "transform": {
+        "position": [
+          -3,
+          0,
+          -8
+        ],
+        "rotationDegrees": [
+          0,
+          0,
+          0
+        ],
+        "scale": [
+          1,
+          1,
+          1
+        ]
+      },
+      "model": {
+        "path": "models/arbol.gltf",
+        "collider": "box"
+      }
+    },
+    {
+      "uuid": "5b3d46e7-9022-473a-90c9-9f549f5b3415",
+      "name": "Arbol 2",
+      "transform": {
+        "position": [
+          8,
+          0,
+          4
+        ],
+        "rotationDegrees": [
+          0,
+          40,
+          0
+        ],
+        "scale": [
+          1,
+          1,
+          1
+        ]
+      },
+      "model": {
+        "path": "models/arbol.gltf",
+        "collider": "box"
+      }
+    },
+    {
+      "uuid": "7c9fff77-31ff-4bad-94dd-a96c0123dd3b",
+      "name": "Barril",
+      "transform": {
+        "position": [
+          -3,
+          0,
+          3
+        ],
+        "rotationDegrees": [
+          0,
+          0,
+          0
+        ],
+        "scale": [
+          1,
+          1,
+          1
+        ]
+      },
+      "model": {
+        "path": "models/barril.gltf",
+        "collider": "mesh"
+      },
+      "body": {
+        "type": "dynamic",
+        "mass": 0,
+        "friction": 0.6,
+        "restitution": 0.1
+      }
+    },
+    {
+      "uuid": "c197b440-6d74-4de7-940f-c75a75bdb9d4",
+      "name": "Tomas",
+      "transform": {
+        "position": [
+          -2,
+          0,
+          -1
+        ],
+        "rotationDegrees": [
+          0,
+          180,
+          0
+        ],
+        "scale": [
+          1,
+          1,
+          1
+        ]
+      },
+      "model": {
+        "path": "models/aldeano.gltf",
+        "collider": "box"
+      },
+      "script": {
+        "path": "scripts/aldeano.luau",
+        "enabled": true,
+        "params": {
+          "nombre": "Tomas"
+        }
+      }
+    },
+    {
+      "uuid": "530dfa2a-f1e2-4fd1-b5a8-87c46f225ef7",
+      "name": "Hud",
+      "transform": {
+        "position": [
+          0,
+          0,
+          0
+        ],
+        "rotationDegrees": [
+          0,
+          0,
+          0
+        ],
+        "scale": [
+          1,
+          1,
+          1
+        ]
+      },
+      "script": {
+        "path": "scripts/hud.luau",
+        "enabled": true,
+        "params": {}
+      }
+    },
+    {
       "uuid": "a3c7c16e-e0fc-47ee-878f-49f590ea733b",
       "name": "Jugador",
       "transform": {
@@ -621,7 +785,13 @@
         "walkSpeed": 4,
         "runSpeed": 7,
         "jumpSpeed": 5,
-        "mouseSensitivity": 0.12
+        "mouseSensitivity": 0.12,
+        "camera": "third",
+        "cameraDistance": 4
+      },
+      "model": {
+        "path": "models/aldeano.gltf",
+        "collider": "none"
       }
     }
   ]

@@ -7,7 +7,9 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
+#include <deque>
 #include <map>
 #include <string_view>
 
@@ -77,6 +79,67 @@ void pushValue(lua_State* L, const std::optional<ScriptValue>& value) {
 
 }
 
+// --- Texto de la interfaz ----------------------------------------------------------------------------
+
+namespace {
+// Caracteres (no bytes) de un texto UTF-8.
+std::size_t glyphCount(std::string_view text) {
+    return static_cast<std::size_t>(std::count_if(text.begin(), text.end(), [](char c) {
+        return (static_cast<unsigned char>(c) & 0xC0u) != 0x80u;
+    }));
+}
+}
+
+float uiTextWidth(const std::string& text, int scale) {
+    std::size_t widest = 0;
+    std::size_t start = 0;
+    while (start <= text.size()) {
+        const auto end = std::min(text.find('\n', start), text.size());
+        widest = std::max(widest, glyphCount(std::string_view(text).substr(start, end - start)));
+        start = end + 1;
+    }
+    return static_cast<float>(widest) * uiGlyphWidth * static_cast<float>(std::max(1, scale));
+}
+
+std::string uiWrap(const std::string& text, float maxWidth, int scale) {
+    const auto perLine = static_cast<std::size_t>(std::max(1.0f, std::floor(maxWidth / (uiGlyphWidth * static_cast<float>(std::max(1, scale))))));
+    std::string result;
+    std::size_t start = 0;
+    while (start <= text.size()) {
+        // Cada párrafo (separado por \n) se parte por palabras; una palabra más larga que la línea se corta.
+        const auto end = std::min(text.find('\n', start), text.size());
+        const std::string_view paragraph = std::string_view(text).substr(start, end - start);
+        std::string line;
+        std::size_t position = 0;
+        while (position < paragraph.size()) {
+            auto next = paragraph.find(' ', position);
+            if (next == std::string_view::npos) next = paragraph.size();
+            std::string word(paragraph.substr(position, next - position));
+            position = next + 1;
+            const std::size_t needed = glyphCount(line) + (line.empty() ? 0 : 1) + glyphCount(word);
+            if (!line.empty() && needed > perLine) {
+                result += line + "\n";
+                line.clear();
+            }
+            while (glyphCount(word) > perLine) {
+                // Corte en un límite de carácter UTF-8.
+                std::size_t cut = 0;
+                for (std::size_t glyphs = 0; cut < word.size() && glyphs < perLine; ++glyphs) {
+                    ++cut;
+                    while (cut < word.size() && (static_cast<unsigned char>(word[cut]) & 0xC0u) == 0x80u) ++cut;
+                }
+                result += word.substr(0, cut) + "\n";
+                word = word.substr(cut);
+            }
+            line += (line.empty() ? "" : " ") + word;
+        }
+        result += line;
+        if (end < text.size()) result += "\n";
+        start = end + 1;
+    }
+    return result;
+}
+
 // --- Estado de la VM -----------------------------------------------------------------------------
 
 struct ScriptHost::Impl {
@@ -104,8 +167,11 @@ struct ScriptHost::Impl {
         int self{LUA_NOREF};
         int module{LUA_NOREF};
         bool disabled{};
+        std::vector<UiCommand> ui;   // lo que dibujó en su último onUpdate
     };
-    std::vector<Instance> instances;
+    // deque: crear objetos desde un script añade instancias mientras otras se están ejecutando, y sus
+    // referencias deben seguir siendo válidas.
+    std::deque<Instance> instances;
     const Instance* current{};
 
     struct Message {
@@ -116,6 +182,7 @@ struct ScriptHost::Impl {
     };
     std::vector<Message> messages;
     ScriptServices services;
+    bool cursor{};
     std::size_t nextInstance{};
     double frameMs{};
 
@@ -133,6 +200,7 @@ struct ScriptHost::Impl {
     std::optional<int> loadModule(const std::string& path, std::vector<ScriptDiagnostic>* diagnostics);
     std::optional<int> moduleFor(const std::string& path);
     void createInstance(const Entity& entity);
+    void spawned(EntityId root);
     bool call(Instance& instance, const char* callback, int args);
     void disable(Instance& instance, const char* callback, const std::string& error);
 };
@@ -253,13 +321,28 @@ int entityStopAudio(lua_State* L) {
     return 0;
 }
 
+int entityDestroy(lua_State* L) {
+    const auto& entity = checkEntity(L, 1);
+    if (auto* impl = implOf(L); impl->services.destroy) impl->services.destroy(entity.id);
+    return 0;
+}
+
 int entityIndex(lua_State* L) {
     auto& entity = checkEntity(L, 1);
     const std::string key = luaL_checkstring(L, 2);
     const auto push = [&](const Vec3& v) { lua_pushvector(L, v.x, v.y, v.z); };
-    if (key == "position") push(entity.transform.position);
-    else if (key == "rotation") push(entity.transform.rotationDegrees);
+    auto* impl = implOf(L);
+    // position y rotation son del mundo (como en Unity); localPosition y localRotation, relativas al padre.
+    if (key == "position") push(worldTransform(*impl->scene, entity).position);
+    else if (key == "rotation") push(worldTransform(*impl->scene, entity).rotationDegrees);
+    else if (key == "localPosition") push(entity.transform.position);
+    else if (key == "localRotation") push(entity.transform.rotationDegrees);
     else if (key == "scale") push(entity.transform.scale);
+    else if (key == "active") lua_pushboolean(L, entity.active);
+    else if (key == "parent") {
+        if (entity.parent && impl->scene->find(entity.parent)) pushEntity(L, entity.parent);
+        else lua_pushnil(L);
+    } else if (key == "destroy") lua_pushcfunction(L, entityDestroy, "destroy");
     else if (key == "name") lua_pushstring(L, entity.name.c_str());
     else if (key == "id") lua_pushnumber(L, static_cast<double>(entity.id));
     else if (key == "send") lua_pushcfunction(L, entitySend, "send");
@@ -272,16 +355,36 @@ int entityIndex(lua_State* L) {
     else if (key == "playSound") lua_pushcfunction(L, entityPlaySound, "playSound");
     else if (key == "playAudio") lua_pushcfunction(L, entityPlayAudio, "playAudio");
     else if (key == "stopAudio") lua_pushcfunction(L, entityStopAudio, "stopAudio");
-    else luaL_error(L, "Entity no tiene el campo '%s' (position, rotation, scale, velocity, name, id, send, applyImpulse, "
-                       "playSound, playAudio, stopAudio)", key.c_str());
+    else luaL_error(L, "Entity no tiene el campo '%s' (position, rotation, localPosition, localRotation, scale, velocity, "
+                       "active, parent, name, id, send, applyImpulse, playSound, playAudio, stopAudio, destroy)", key.c_str());
     return 1;
 }
 
 int entityNewIndex(lua_State* L) {
     auto& entity = checkEntity(L, 1);
     const std::string key = luaL_checkstring(L, 2);
-    if (key == "position") entity.transform.position = checkVector(L, 3, "position");
-    else if (key == "rotation") entity.transform.rotationDegrees = checkVector(L, 3, "rotation");
+    auto* impl = implOf(L);
+    if (key == "position" || key == "rotation") {
+        Transform world = worldTransform(*impl->scene, entity);
+        if (key == "position") world.position = checkVector(L, 3, "position");
+        else world.rotationDegrees = checkVector(L, 3, "rotation");
+        const auto local = localTransform(*impl->scene, entity.parent, world);
+        entity.transform.position = local.position;
+        entity.transform.rotationDegrees = local.rotationDegrees;
+    } else if (key == "localPosition") entity.transform.position = checkVector(L, 3, "localPosition");
+    else if (key == "localRotation") entity.transform.rotationDegrees = checkVector(L, 3, "localRotation");
+    else if (key == "active") entity.active = lua_toboolean(L, 3) != 0;
+    else if (key == "parent") {
+        // Cambiar de padre conserva la posición en el mundo.
+        EntityId parent = 0;
+        if (!lua_isnil(L, 3)) {
+            parent = checkEntity(L, 3).id;
+            if (parent == entity.id || isAncestor(*impl->scene, entity.id, parent)) luaL_error(L, "ese padre crearia un ciclo");
+        }
+        const Transform world = worldTransform(*impl->scene, entity);
+        entity.parent = parent;
+        entity.transform = localTransform(*impl->scene, parent, world);
+    }
     else if (key == "scale") {
         const auto scale = checkVector(L, 3, "scale");
         if (!(scale.x > 0 && scale.y > 0 && scale.z > 0)) luaL_error(L, "la escala debe ser mayor que cero");
@@ -363,6 +466,21 @@ int scenePlayer(lua_State* L) {
     return 1;
 }
 
+int sceneSpawn(lua_State* L) {
+    const std::string prefab = luaL_checkstring(L, 1);
+    const Vec3 position = lua_isnoneornil(L, 2) ? Vec3{} : checkVector(L, 2, "la posicion");
+    auto* impl = implOf(L);
+    const EntityId root = impl->services.spawn ? impl->services.spawn(prefab, position) : EntityId{};
+    if (!root || !impl->scene->find(root)) {
+        lua_pushnil(L);
+        return 1;
+    }
+    // Los scripts de lo creado empiezan ya (su onStart corre ahora, con su propio presupuesto).
+    impl->spawned(root);
+    pushEntity(L, root);
+    return 1;
+}
+
 int audioPlay(lua_State* L) {
     const std::string clip = luaL_checkstring(L, 1);
     const double volume = luaL_optnumber(L, 2, 1.0);
@@ -378,6 +496,154 @@ int inputCheck(lua_State* L, bool pressed) {
 }
 int inputIsDown(lua_State* L) { return inputCheck(L, false); }
 int inputWasPressed(lua_State* L) { return inputCheck(L, true); }
+
+// --- Interfaz (ui.*) -----------------------------------------------------------------------------
+
+// "#rgb", "#rrggbb" o "#rrggbbaa" -> 0xAABBGGRR. Sin color: el que se indique.
+std::uint32_t checkColor(lua_State* L, int index, std::uint32_t fallback) {
+    if (lua_isnoneornil(L, index)) return fallback;
+    const std::string text = luaL_checkstring(L, index);
+    std::string hex = text.starts_with("#") ? text.substr(1) : text;
+    if (hex.size() == 3) hex = {hex[0], hex[0], hex[1], hex[1], hex[2], hex[2]};
+    if (hex.size() == 6) hex += "ff";
+    const bool valid = hex.size() == 8 && std::all_of(hex.begin(), hex.end(), [](char c) { return std::isxdigit(static_cast<unsigned char>(c)); });
+    if (!valid) luaL_error(L, "color no valido '%s' (usa \"#rrggbb\" o \"#rrggbbaa\")", text.c_str());
+    const auto value = static_cast<std::uint32_t>(std::stoul(hex, nullptr, 16));
+    const std::uint32_t r = value >> 24, g = (value >> 16) & 0xFFu, b = (value >> 8) & 0xFFu, a = value & 0xFFu;
+    return r | (g << 8) | (b << 16) | (a << 24);
+}
+
+int checkScale(lua_State* L, int index) {
+    return std::clamp(static_cast<int>(luaL_optinteger(L, index, 1)), 1, 8);
+}
+
+UiCommand& pushUi(lua_State* L, UiCommand::Kind kind) {
+    auto* impl = implOf(L);
+    if (!impl->current) luaL_error(L, "ui solo se puede usar desde los callbacks de un script");
+    auto& list = const_cast<ScriptHost::Impl::Instance*>(impl->current)->ui;
+    if (list.size() >= 2000) luaL_error(L, "demasiadas ordenes de ui en un fotograma (maximo 2000)");
+    list.push_back({});
+    list.back().kind = kind;
+    return list.back();
+}
+
+void readRect(lua_State* L, int first, UiCommand& command) {
+    command.x = static_cast<float>(luaL_checknumber(L, first));
+    command.y = static_cast<float>(luaL_checknumber(L, first + 1));
+    command.w = static_cast<float>(std::max(0.0, luaL_checknumber(L, first + 2)));
+    command.h = static_cast<float>(std::max(0.0, luaL_checknumber(L, first + 3)));
+}
+
+int uiWidth(lua_State* L) {
+    lua_pushnumber(L, implOf(L)->input.uiWidth);
+    return 1;
+}
+
+int uiHeight(lua_State* L) {
+    lua_pushnumber(L, implOf(L)->input.uiHeight);
+    return 1;
+}
+
+int uiMouse(lua_State* L) {
+    const auto& input = implOf(L)->input;
+    if (input.mouseX < 0.0f) {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_pushnumber(L, input.mouseX);
+    lua_pushnumber(L, input.mouseY);
+    return 2;
+}
+
+// ui.rect(x, y, ancho, alto, color)
+int uiRect(lua_State* L) {
+    UiCommand command;
+    readRect(L, 1, command);
+    command.color = checkColor(L, 5, 0xFFFFFFFFu);
+    pushUi(L, UiCommand::Kind::rect) = command;
+    return 0;
+}
+
+// ui.panel(x, y, ancho, alto, [relleno], [borde]): recuadro de diálogo con borde de 1 píxel.
+int uiPanel(lua_State* L) {
+    UiCommand command;
+    command.kind = UiCommand::Kind::panel;
+    readRect(L, 1, command);
+    command.color = checkColor(L, 5, 0xE62C1C1Au);
+    command.background = checkColor(L, 6, 0xFFF4F4F4u);
+    pushUi(L, UiCommand::Kind::panel) = command;
+    return 0;
+}
+
+// ui.text(texto, x, y, [color], [escala], [alineado "left" | "center" | "right"])
+int uiText(lua_State* L) {
+    UiCommand command;
+    command.kind = UiCommand::Kind::text;
+    command.text = luaL_checkstring(L, 1);
+    command.x = static_cast<float>(luaL_checknumber(L, 2));
+    command.y = static_cast<float>(luaL_checknumber(L, 3));
+    command.color = checkColor(L, 4, 0xFFFFFFFFu);
+    command.scale = checkScale(L, 5);
+    const std::string align = luaL_optstring(L, 6, "left");
+    const float width = uiTextWidth(command.text, command.scale);
+    if (align == "center") command.x -= std::floor(width * 0.5f);
+    else if (align == "right") command.x -= width;
+    else if (align != "left") luaL_error(L, "alineado desconocido '%s' (left, center o right)", align.c_str());
+    command.w = width;
+    pushUi(L, UiCommand::Kind::text) = command;
+    return 0;
+}
+
+// ui.bar(x, y, ancho, alto, valor 0..1, [color], [fondo]): barra de vida, energía, progreso...
+int uiBar(lua_State* L) {
+    UiCommand command;
+    command.kind = UiCommand::Kind::bar;
+    readRect(L, 1, command);
+    command.value = static_cast<float>(std::clamp(luaL_checknumber(L, 5), 0.0, 1.0));
+    command.color = checkColor(L, 6, 0xFF4C4CD9u);
+    command.background = checkColor(L, 7, 0xCC201818u);
+    pushUi(L, UiCommand::Kind::bar) = command;
+    return 0;
+}
+
+// ui.button(texto, x, y, ancho, alto) -> true el fotograma en que se pulsa.
+int uiButton(lua_State* L) {
+    UiCommand command;
+    command.kind = UiCommand::Kind::button;
+    command.text = luaL_checkstring(L, 1);
+    readRect(L, 2, command);
+    const auto& input = implOf(L)->input;
+    const bool inside = input.mouseX >= command.x && input.mouseY >= command.y && input.mouseX < command.x + command.w &&
+                        input.mouseY < command.y + command.h;
+    command.state = inside ? (input.mouseDown ? 2 : 1) : 0;
+    command.color = 0xFFFFFFFFu;
+    pushUi(L, UiCommand::Kind::button) = command;
+    lua_pushboolean(L, inside && input.mousePressed);
+    return 1;
+}
+
+int uiTextWidthLua(lua_State* L) {
+    lua_pushnumber(L, uiTextWidth(luaL_checkstring(L, 1), checkScale(L, 2)));
+    return 1;
+}
+
+int uiLineHeightLua(lua_State* L) {
+    lua_pushnumber(L, uiLineHeight * static_cast<float>(checkScale(L, 1)));
+    return 1;
+}
+
+int uiWrapLua(lua_State* L) {
+    const std::string text = luaL_checkstring(L, 1);
+    const auto width = static_cast<float>(luaL_checknumber(L, 2));
+    lua_pushstring(L, uiWrap(text, width, checkScale(L, 3)).c_str());
+    return 1;
+}
+
+int uiCursor(lua_State* L) {
+    luaL_checktype(L, 1, LUA_TBOOLEAN);
+    implOf(L)->cursor = lua_toboolean(L, 1) != 0;
+    return 0;
+}
 
 void setFunction(lua_State* L, const char* name, lua_CFunction function) {
     lua_pushcfunction(L, function, name);
@@ -417,6 +683,7 @@ bool ScriptHost::Impl::open() {
     setFunction(L, "send", sceneSend);
     setFunction(L, "time", sceneTime);
     setFunction(L, "player", scenePlayer);
+    setFunction(L, "spawn", sceneSpawn);
     lua_setglobal(L, "scene");
     lua_newtable(L);
     setFunction(L, "play", audioPlay);
@@ -425,6 +692,20 @@ bool ScriptHost::Impl::open() {
     setFunction(L, "isDown", inputIsDown);
     setFunction(L, "wasPressed", inputWasPressed);
     lua_setglobal(L, "input");
+    lua_newtable(L);
+    setFunction(L, "width", uiWidth);
+    setFunction(L, "height", uiHeight);
+    setFunction(L, "mouse", uiMouse);
+    setFunction(L, "rect", uiRect);
+    setFunction(L, "panel", uiPanel);
+    setFunction(L, "text", uiText);
+    setFunction(L, "bar", uiBar);
+    setFunction(L, "button", uiButton);
+    setFunction(L, "textWidth", uiTextWidthLua);
+    setFunction(L, "lineHeight", uiLineHeightLua);
+    setFunction(L, "wrap", uiWrapLua);
+    setFunction(L, "cursor", uiCursor);
+    lua_setglobal(L, "ui");
 
     // Las bibliotecas y globales del motor quedan de solo lectura; cada script tiene sus propias globales.
     luaL_sandbox(L);
@@ -440,6 +721,7 @@ void ScriptHost::Impl::close() {
     instances.clear();
     messages.clear();
     current = nullptr;
+    cursor = false;
     nextInstance = 0;
     memory = 0;
 }
@@ -550,8 +832,20 @@ void ScriptHost::Impl::createInstance(const Entity& entity) {
     call(instances.back(), "onStart", 0);
 }
 
+void ScriptHost::Impl::spawned(EntityId root) {
+    if (!scene) return;
+    std::vector<EntityId> ids{root};
+    const auto rest = descendantsOf(*scene, root);
+    ids.insert(ids.end(), rest.begin(), rest.end());
+    for (const auto id : ids) {
+        const auto* entity = scene->find(id);
+        if (entity && entity->script && entity->script->enabled && activeInHierarchy(*scene, *entity)) createInstance(*entity);
+    }
+}
+
 void ScriptHost::Impl::disable(Instance& instance, const char* callback, const std::string& error) {
     instance.disabled = true;
+    instance.ui.clear();
     if (scene) {
         if (auto* entity = scene->find(instance.entity); entity && entity->script) entity->script->enabled = false;
     }
@@ -609,11 +903,10 @@ void ScriptHost::start(Scene& scene) {
         impl.report(true, "Scripts: no se pudo crear la maquina virtual de Luau");
         return;
     }
-    impl.instances.reserve(scene.entities().size());
     // Se copian los ids primero: onStart puede cambiar la escena.
     std::vector<EntityId> ids;
     for (const auto& entity : scene.entities()) {
-        if (entity.script && entity.script->enabled && !entity.script->path.empty()) ids.push_back(entity.id);
+        if (activeInHierarchy(scene, entity) && entity.script && entity.script->enabled && !entity.script->path.empty()) ids.push_back(entity.id);
     }
     for (const auto id : ids) {
         if (const auto* entity = scene.find(id)) impl.createInstance(*entity);
@@ -635,6 +928,9 @@ void ScriptHost::update(Scene& scene, float dt, const ScriptInput& input) {
             impl.nextInstance = index;
             break;
         }
+        // La interfaz es inmediata: cada onUpdate vuelve a dibujar la suya (si no llega a ejecutarse este
+        // fotograma por falta de tiempo, se conserva la anterior y no parpadea).
+        impl.instances[index].ui.clear();
         lua_pushnumber(impl.L, dt);
         impl.call(impl.instances[index], "onUpdate", 1);
     }
@@ -653,6 +949,19 @@ void ScriptHost::update(Scene& scene, float dt, const ScriptInput& input) {
     }
     lua_gc(impl.L, LUA_GCSTEP, 0);
     impl.frameMs = elapsed();
+}
+
+std::vector<UiCommand> ScriptHost::uiCommands() const {
+    std::vector<UiCommand> all;
+    for (const auto& instance : impl_->instances) {
+        if (!impl_->scene || !impl_->scene->find(instance.entity)) continue;
+        all.insert(all.end(), instance.ui.begin(), instance.ui.end());
+    }
+    return all;
+}
+
+bool ScriptHost::wantsCursor() const noexcept {
+    return impl_->L && impl_->cursor;
 }
 
 bool ScriptHost::interact(Scene& scene, EntityId entity) {

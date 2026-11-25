@@ -1,6 +1,8 @@
 #pragma once
 
+#include "ge3d/Model.hpp"
 #include "ge3d/Scene.hpp"
+#include <functional>
 #include <array>
 #include <memory>
 #include <optional>
@@ -50,6 +52,10 @@ public:
     ~PhysicsWorld();
     PhysicsWorld(const PhysicsWorld&) = delete;
     PhysicsWorld& operator=(const PhysicsWorld&) = delete;
+
+    // De dónde salen los modelos (para sus colisionadores). Sin esto, los modelos no chocan.
+    using ModelSource = std::function<std::shared_ptr<const ModelData>(const std::string& path)>;
+    void setModelSource(ModelSource source);
 
     void build(const Scene& scene);
     // Avanza el tiempo de un fotograma en pasos fijos y sincroniza la escena. input solo afecta al jugador.
