@@ -434,7 +434,7 @@ SwapchainSupport querySwapchain(VkPhysicalDevice device, VkSurfaceKHR surface) {
     return result;
 }
 
-void run() {
+void run(const std::filesystem::path& initialScene) {
     if (!glfwInit()) throw std::runtime_error("GLFW initialization failed");
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
@@ -742,7 +742,7 @@ void run() {
         float contentScaleX = 1.0f;
         float contentScaleY = 1.0f;
         glfwGetWindowContentScale(window, &contentScaleX, &contentScaleY);
-        EditorView editor(contentScaleX);
+        EditorView editor(contentScaleX, initialScene);
         ge3d::MaterialLibrary library;
         std::uint64_t materialsVersion = 1;
         const auto contentRoot = ge3d::pathFromUtf8(GE3D_CONTENT_DIR);
@@ -1044,6 +1044,9 @@ void run() {
         int lastHeight = 0;
         bool recreate = true;
         std::string windowTitle;
+        bool mouseCaptured = false;
+        double lastCursorX = 0, lastCursorY = 0;
+        bool lastMouseButton = false;
         std::cout << "Vulkan pixel art preview\n";
         while (!editor.quitApproved()) {
             glfwPollEvents();
@@ -1096,6 +1099,29 @@ void run() {
                                                     std::to_string(sceneCapacity.height));
             }
             editor.setSceneCapacity({sceneCapacity.width, sceneCapacity.height});
+
+            // Jugador en primera persona: el cursor desaparece y su movimiento se lee directamente de GLFW
+            // (la interfaz deja de recibir el ratón mientras tanto).
+            if (!glfwGetWindowAttrib(window, GLFW_FOCUSED)) editor.releaseMouse();
+            const bool wantCapture = editor.wantsMouseCapture();
+            if (wantCapture != mouseCaptured) {
+                mouseCaptured = wantCapture;
+                glfwSetInputMode(window, GLFW_CURSOR, mouseCaptured ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+                if (glfwRawMouseMotionSupported()) glfwSetInputMode(window, GLFW_RAW_MOUSE_MOTION, mouseCaptured ? GLFW_TRUE : GLFW_FALSE);
+                glfwGetCursorPos(window, &lastCursorX, &lastCursorY);
+                lastMouseButton = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+                auto& flags = ImGui::GetIO().ConfigFlags;
+                flags = mouseCaptured ? (flags | ImGuiConfigFlags_NoMouse) : (flags & ~ImGuiConfigFlags_NoMouse);
+            }
+            if (mouseCaptured) {
+                double x = 0, y = 0;
+                glfwGetCursorPos(window, &x, &y);
+                const bool button = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+                editor.setCapturedMouse(static_cast<float>(x - lastCursorX), static_cast<float>(y - lastCursorY), button && !lastMouseButton);
+                lastCursorX = x;
+                lastCursorY = y;
+                lastMouseButton = button;
+            }
 
             ImGui_ImplVulkan_NewFrame();
             ImGui_ImplGlfw_NewFrame();
@@ -1336,7 +1362,10 @@ void run() {
 
 }
 
-int main() {
-    try { run(); }
+// Uso: ge3d_vulkan_editor [escena.scene.json]
+int main(int argc, char** argv) {
+    std::filesystem::path scene;
+    if (argc > 1) scene = std::filesystem::absolute(ge3d::pathFromUtf8(argv[1]));
+    try { run(scene); }
     catch (const std::exception& error) { std::cerr << "Vulkan editor: " << error.what() << '\n'; return 1; }
 }

@@ -34,6 +34,7 @@ end
 function Puerta.onInteract(self)
 	self.abierta = not self.abierta
 	self.objetivo = if self.abierta then self.angulo else 0
+	self.entity:playSound("sounds/puerta.wav", 0.8)
 	log(if self.abierta then "se abre" else "se cierra")
 end
 

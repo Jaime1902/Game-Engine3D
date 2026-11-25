@@ -370,11 +370,11 @@ bool isSceneFile(const std::filesystem::path& path) {
 
 // =============================================================================================
 
-EditorView::EditorView(float uiScale) : scale_(std::clamp(uiScale, 0.75f, 3.0f)) {
+EditorView::EditorView(float uiScale, std::filesystem::path initialScene) : scale_(std::clamp(uiScale, 0.75f, 3.0f)) {
     applyTheme(scale_);
     loadFonts(scale_, boldFont_, codeFont_);
 
-    scenePath_ = ge3d::pathFromUtf8(GE3D_DEFAULT_SCENE);
+    scenePath_ = initialScene.empty() ? ge3d::pathFromUtf8(GE3D_DEFAULT_SCENE) : std::move(initialScene);
     contentRoot_ = ge3d::pathFromUtf8(GE3D_CONTENT_DIR);
     // Scripts: se leen de Content y escriben en la Consola. La VM solo existe durante Play.
     scripts_ = std::make_unique<ge3d::ScriptHost>(
@@ -1191,6 +1191,7 @@ void EditorView::drawHeightmapComponent(ge3d::Entity& entity, const ge3d::Entity
 // --- Cámara ----------------------------------------------------------------------------------
 
 glm::mat4 EditorView::view() const {
+    if (firstPerson_) return glm::lookAtRH(fpEye_, fpEye_ + fpForward(), {0, 1, 0});
     const glm::vec3 orbit{std::sin(yaw_) * std::cos(pitch_), std::sin(pitch_),
                           std::cos(yaw_) * std::cos(pitch_)};
     return glm::lookAtRH(pivot_ + orbit * distance_, pivot_, {0, 1, 0});
@@ -1208,7 +1209,7 @@ glm::mat4 EditorView::projection() const {
 }
 
 EditorView::CameraSnap EditorView::cameraSnap() const {
-    if (!style_.snapCamera || style_.pixelSize <= 1) return {};
+    if (!style_.snapCamera || style_.pixelSize <= 1 || firstPerson_) return {};
     // Tamaño en el mundo de un píxel de la escena a la distancia del punto que se mira. Si la cámara
     // solo se mueve en múltiplos de ese tamaño, lo que se ve no cambia de píxel al desplazarse; el resto
     // se compensa moviendo la imagen una fracción de píxel en pantalla (el movimiento sigue siendo suave).
@@ -1235,6 +1236,7 @@ EditorView::GridView EditorView::gridView() const {
 }
 
 glm::vec3 EditorView::cameraPosition() const {
+    if (firstPerson_) return fpEye_;
     const glm::vec3 orbit{std::sin(yaw_) * std::cos(pitch_), std::sin(pitch_), std::cos(yaw_) * std::cos(pitch_)};
     return pivot_ + orbit * distance_;
 }
@@ -1653,12 +1655,15 @@ void EditorView::togglePlay() {
             if (entity.heightmap && entity.heightmap->data) waterSimulation(entity.id).wakeAll(*entity.heightmap->data);
         }
         log("Play: los cambios que hagas ahora se descartan al detener");
+        // Física, audio y jugador; después los scripts (que ya pueden usar la física y el sonido).
+        startPlaySystems();
         // Scripts: VM nueva para esta copia. Haz clic en un objeto con script para interactuar.
         scripts_->start(scene_);
         ImGui::SetWindowFocus("Escena");
     } else {
         // onStop y destrucción de la VM antes de recuperar la escena: nada de Play sobrevive.
         scripts_->stop(scene_);
+        stopPlaySystems();
         scene_ = std::move(*playSnapshot_);
         playSnapshot_.reset();
         water_.clear();
@@ -1679,8 +1684,7 @@ void EditorView::togglePause() {
 void EditorView::step() {
     if (isPlaying() && paused_) {
         ++playFrames_;
-        scripts_->update(scene_, 1.0f / 60.0f, gatherInput());
-        simulateWater(1.0f / 60.0f);
+        updatePlay(1.0f / 60.0f);
     }
 }
 
@@ -1859,6 +1863,11 @@ void EditorView::drawMenuBar() {
         ImGui::Separator();
         if (ImGui::MenuItem("Terreno")) createHeightmap();
         if (ImGui::MenuItem("Terreno de voxeles")) createTerrain();
+        ImGui::Separator();
+        if (ImGui::MenuItem("Jugador (primera persona)")) createSpecial(Special::player);
+        if (ImGui::MenuItem("Zona (trigger)")) createSpecial(Special::zone);
+        if (ImGui::MenuItem("Fuente de sonido")) createSpecial(Special::sound);
+        ImGui::Separator();
         if (ImGui::MenuItem("Objeto vacio")) {
             auto entity = scene_.makeEntity("Objeto", ge3d::Transform{{std::round(pivot_.x), 0, std::round(pivot_.z)}, {}, {1, 1, 1}});
             const auto id = entity.id;
@@ -2088,6 +2097,10 @@ void EditorView::drawHierarchy() {
             if (ImGui::MenuItem("Rampa")) createPrimitive(ge3d::Primitive::ramp);
             if (ImGui::MenuItem("Terreno")) createHeightmap();
             if (ImGui::MenuItem("Terreno de voxeles")) createTerrain();
+            ImGui::Separator();
+            if (ImGui::MenuItem("Jugador")) createSpecial(Special::player);
+            if (ImGui::MenuItem("Zona (trigger)")) createSpecial(Special::zone);
+            if (ImGui::MenuItem("Fuente de sonido")) createSpecial(Special::sound);
             ImGui::EndPopup();
         }
         ImGui::SameLine();
@@ -2191,7 +2204,7 @@ void EditorView::drawInspector() {
         }
 
         // Los componentes se quitan con clic derecho en su cabecera.
-        enum class Removal { none, shape, terrain, heightmap, script };
+        enum class Removal { none, shape, terrain, heightmap, script, body, audio, player };
         Removal removal = Removal::none;
         const auto removeMenu = [&](const char* id, Removal kind) {
             if (ImGui::BeginPopupContextItem(id)) {
@@ -2267,6 +2280,25 @@ void EditorView::drawInspector() {
             ImGui::Spacing();
         }
 
+        if (entity->body) {
+            const bool open = componentHeader("Cuerpo fisico", boldFont_);
+            removeMenu("cuerpo_menu", Removal::body);
+            if (open) drawBodyComponent(*entity, frameStart);
+            ImGui::Spacing();
+        }
+        if (entity->audio) {
+            const bool open = componentHeader("Fuente de audio", boldFont_);
+            removeMenu("audio_menu", Removal::audio);
+            if (open) drawAudioComponent(*entity, frameStart);
+            ImGui::Spacing();
+        }
+        if (entity->player) {
+            const bool open = componentHeader("Jugador", boldFont_);
+            removeMenu("jugador_menu", Removal::player);
+            if (open) drawPlayerComponent(*entity, frameStart);
+            ImGui::Spacing();
+        }
+
         // Componente Script: comportamiento en Luau con sus parámetros.
         if (entity->script) {
             const bool open = componentHeader("Script", boldFont_);
@@ -2281,6 +2313,9 @@ void EditorView::drawInspector() {
             if (removal == Removal::terrain) entity->terrain.reset();
             if (removal == Removal::heightmap) entity->heightmap.reset();
             if (removal == Removal::script) entity->script.reset();
+            if (removal == Removal::body) entity->body.reset();
+            if (removal == Removal::audio) entity->audio.reset();
+            if (removal == Removal::player) entity->player.reset();
             commitModification(before, "Quitar componente");
         }
 
@@ -2325,8 +2360,22 @@ void EditorView::drawInspector() {
                 ImGui::EndMenu();
             }
             ImGui::Separator();
-            ImGui::MenuItem("Cuerpo fisico (etapa 4)", nullptr, false, false);
-            ImGui::MenuItem("Fuente de audio (etapa 4)", nullptr, false, false);
+            if (ImGui::MenuItem("Cuerpo fisico", nullptr, false, !entity->body)) {
+                entity->body = ge3d::BodyComponent{};
+                added = true;
+            }
+            if (ImGui::MenuItem("Zona (trigger)", nullptr, false, !entity->body)) {
+                entity->body = ge3d::BodyComponent{ge3d::BodyType::trigger};
+                added = true;
+            }
+            if (ImGui::MenuItem("Fuente de audio", nullptr, false, !entity->audio)) {
+                entity->audio = ge3d::AudioSourceComponent{soundList_.empty() ? std::string() : soundList_.front()};
+                added = true;
+            }
+            if (ImGui::MenuItem("Jugador", nullptr, false, !entity->player)) {
+                entity->player = ge3d::PlayerComponent{};
+                added = true;
+            }
             if (added) commitModification(before, "Agregar componente");
             ImGui::EndPopup();
         }
@@ -2516,7 +2565,13 @@ void EditorView::drawViewport(ImTextureID sceneTexture) {
             draw->ChannelsSetCurrent(1);
             if (isPlaying()) draw->AddRect(origin, end, ImGui::GetColorU32(accentHover), 0, 0, 2 * scale_);
 
-            const bool hovered = ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(origin, end);
+            const bool viewHovered = ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(origin, end);
+            if (firstPerson_ && !mouseCaptured_ && viewHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                mouseCaptured_ = true;
+                ImGui::SetWindowFocus();
+            }
+            // En primera persona el ratón es del jugador: nada de órbita, gizmos ni selección en la vista.
+            const bool hovered = viewHovered && !firstPerson_;
             const bool altOrbit = io.KeyAlt && ImGui::IsMouseDown(ImGuiMouseButton_Left);
             orbiting_ = (orbiting_ || (hovered && (ImGui::IsMouseClicked(ImGuiMouseButton_Right) ||
                                                    (io.KeyAlt && ImGui::IsMouseClicked(ImGuiMouseButton_Left))))) &&
@@ -2543,7 +2598,7 @@ void EditorView::drawViewport(ImTextureID sceneTexture) {
             const auto projectionMatrix = projection();
             bool overGizmo = false;
             auto* entity = scene_.find(selected_);
-            const bool gizmoTool = tool_ == Tool::move || tool_ == Tool::rotate || tool_ == Tool::scale;
+            const bool gizmoTool = (tool_ == Tool::move || tool_ == Tool::rotate || tool_ == Tool::scale) && !firstPerson_;
             if (entity && gizmoTool && !orbiting_) {
                 const ImGuizmo::OPERATION operation = tool_ == Tool::move ? ImGuizmo::TRANSLATE
                                                     : tool_ == Tool::rotate ? ImGuizmo::ROTATE : ImGuizmo::SCALE;
@@ -2576,9 +2631,12 @@ void EditorView::drawViewport(ImTextureID sceneTexture) {
             // Cubo de orientación en la esquina superior derecha: clic en una cara para alinear la vista.
             const float cube = std::min(90.0f * scale_, size.y * 0.42f);
             const glm::mat4 previousView = viewMatrix;
-            ImGuizmo::ViewManipulate(glm::value_ptr(viewMatrix), distance_, {end.x - cube, origin.y}, {cube, cube}, 0x00000000);
-            if (viewMatrix != previousView) setViewFromMatrix(viewMatrix);
-            const bool overCube = ImGuizmo::IsViewManipulateHovered();
+            bool overCube = false;
+            if (!firstPerson_) {
+                ImGuizmo::ViewManipulate(glm::value_ptr(viewMatrix), distance_, {end.x - cube, origin.y}, {cube, cube}, 0x00000000);
+                if (viewMatrix != previousView) setViewFromMatrix(viewMatrix);
+                overCube = ImGuizmo::IsViewManipulateHovered();
+            }
 
             const bool canUseMouse = hovered && !overGizmo && !overCube && !io.KeyAlt && !orbiting_ && !panning_;
             if (tool_ == Tool::paint) {
@@ -2612,6 +2670,7 @@ void EditorView::drawViewport(ImTextureID sceneTexture) {
             }
             if (tool_ == Tool::build) handleBuildTool(draw, origin, size, canUseMouse);
             if (tool_ == Tool::terrain) handleTerrainTool(draw, origin, size, canUseMouse);
+            drawPlayOverlay(draw, origin, size);
             draw->PopClipRect();
 
             draw->ChannelsSetCurrent(0);
@@ -2781,9 +2840,7 @@ void EditorView::buildDefaultLayout(ImGuiID dock) {
 void EditorView::draw(ImTextureID sceneTexture) {
     if (isPlaying() && !paused_) {
         ++playFrames_;
-        const float dt = std::min(ImGui::GetIO().DeltaTime, 1.0f / 20.0f);
-        scripts_->update(scene_, dt, gatherInput());
-        simulateWater(dt);
+        updatePlay(std::min(ImGui::GetIO().DeltaTime, 1.0f / 20.0f));
     }
     watchScripts();
 

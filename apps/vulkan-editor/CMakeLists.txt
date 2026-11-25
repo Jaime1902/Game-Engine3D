@@ -19,9 +19,9 @@ add_library(ge3d_editor_widgets STATIC
 )
 target_include_directories(ge3d_editor_widgets SYSTEM PUBLIC "${imgui_SOURCE_DIR}" "${imguizmo_SOURCE_DIR}/src")
 target_link_libraries(ge3d_editor_widgets PRIVATE Vulkan::Vulkan glfw)
-target_link_libraries(ge3d_vulkan_editor PRIVATE ge3d::runtime ge3d::scripting ge3d_editor_widgets Vulkan::Vulkan glfw GPUOpen::VulkanMemoryAllocator)
+target_link_libraries(ge3d_vulkan_editor PRIVATE ge3d::runtime ge3d::scripting ge3d::physics ge3d::audio ge3d_editor_widgets Vulkan::Vulkan glfw GPUOpen::VulkanMemoryAllocator)
 target_include_directories(ge3d_vulkan_editor SYSTEM PRIVATE "${glm_SOURCE_DIR}")
-target_sources(ge3d_vulkan_editor PRIVATE vma.cpp EditorView.cpp EditorLog.cpp MaterialTextures.cpp TerrainRenderer.cpp EditorScripts.cpp)
+target_sources(ge3d_vulkan_editor PRIVATE vma.cpp EditorView.cpp EditorLog.cpp MaterialTextures.cpp TerrainRenderer.cpp EditorScripts.cpp EditorPlay.cpp)
 # vma.cpp solo compila la implementación de VulkanMemoryAllocator (código externo).
 if(NOT MSVC)
     set_source_files_properties(vma.cpp PROPERTIES COMPILE_OPTIONS "-w")

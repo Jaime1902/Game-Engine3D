@@ -100,6 +100,17 @@ void EditorView::watchScripts(bool force) {
         }
     }
     std::sort(scriptList_.begin(), scriptList_.end());
+    soundList_.clear();
+    const auto sounds = contentRoot_ / "sounds";
+    if (std::filesystem::is_directory(sounds, error)) {
+        for (auto it = std::filesystem::directory_iterator(sounds, error); !error && it != std::filesystem::directory_iterator();
+             it.increment(error)) {
+            if (it->path().extension() != ".wav") continue;
+            const auto clip = "sounds/" + ge3d::pathToUtf8(it->path().filename());
+            if (ge3d::isValidSoundPath(clip)) soundList_.push_back(clip);
+        }
+    }
+    std::sort(soundList_.begin(), soundList_.end());
     // Cambios hechos fuera del editor (o con otro editor de texto): se recargan como al guardar.
     for (const auto& path : scriptList_) {
         const auto time = std::filesystem::last_write_time(scriptFile(path), error);
@@ -232,8 +243,18 @@ void EditorView::drawScriptApi() {
     ImGui::TextUnformatted("entity.position, entity.rotation, entity.scale   -- vector (lectura y escritura)\n"
                            "entity.name, entity.id\n"
                            "entity:send(evento, valor)                       -- mensaje a su script");
+    ImGui::SeparatorText("Fisica y sonido");
+    ImGui::TextUnformatted("entity.velocity                                  -- vector (cuerpos dinamicos)\n"
+                           "entity:applyImpulse(vector.create(0, 5, 0))\n"
+                           "entity:playSound(\"sounds/puerta.wav\", volumen)   -- desde la entidad\n"
+                           "entity:playAudio(), entity:stopAudio()             -- su Fuente de audio\n"
+                           "audio.play(\"sounds/campana.wav\", volumen)        -- sin posicion\n"
+                           "function S.onTriggerEnter(self, otro) end          -- zonas\n"
+                           "function S.onTriggerExit(self, otro) end\n"
+                           "function S.onCollision(self, otro, velocidad) end");
     ImGui::SeparatorText("Motor");
     ImGui::TextUnformatted("scene.find(nombre) -> entidad o nil\n"
+                           "scene.player() -> el jugador o nil\n"
                            "scene.send(nombre, evento, valor)\n"
                            "scene.time() -> segundos desde Play\n"
                            "input.isDown(\"E\"), input.wasPressed(\"Space\")   -- A-Z, 0-9, Space, Enter,\n"

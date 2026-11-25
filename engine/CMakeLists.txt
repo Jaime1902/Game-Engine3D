@@ -80,3 +80,50 @@ add_library(ge3d_scripting STATIC scripting/src/ScriptHost.cpp)
 add_library(ge3d::scripting ALIAS ge3d_scripting)
 target_include_directories(ge3d_scripting PUBLIC scripting/include)
 target_link_libraries(ge3d_scripting PUBLIC ge3d::runtime PRIVATE Luau.VM Luau.Compiler ge3d_options)
+
+# --- Física: Jolt Physics v5.3.0 (MIT), fijada por tag. Solo la biblioteca. ---
+set(TARGET_UNIT_TESTS OFF CACHE INTERNAL "")
+set(TARGET_HELLO_WORLD OFF CACHE INTERNAL "")
+set(TARGET_PERFORMANCE_TEST OFF CACHE INTERNAL "")
+set(TARGET_SAMPLES OFF CACHE INTERNAL "")
+set(TARGET_VIEWER OFF CACHE INTERNAL "")
+set(ENABLE_ALL_WARNINGS OFF CACHE INTERNAL "")
+set(INTERPROCEDURAL_OPTIMIZATION OFF CACHE INTERNAL "")
+set(USE_STATIC_MSVC_RUNTIME_LIBRARY OFF CACHE INTERNAL "")
+set(CPP_EXCEPTIONS_ENABLED ON CACHE INTERNAL "")
+set(CPP_RTTI_ENABLED ON CACHE INTERNAL "")
+set(DEBUG_RENDERER_IN_DEBUG_AND_RELEASE OFF CACHE INTERNAL "")
+set(PROFILER_IN_DEBUG_AND_RELEASE OFF CACHE INTERNAL "")
+set(FLOATING_POINT_EXCEPTIONS_ENABLED OFF CACHE INTERNAL "")
+FetchContent_Declare(jolt
+    GIT_REPOSITORY https://github.com/jrouwe/JoltPhysics.git
+    GIT_TAG v5.3.0
+    GIT_SHALLOW TRUE
+    SOURCE_SUBDIR Build
+)
+FetchContent_MakeAvailable(jolt)
+if(NOT MSVC)
+    # Código externo sin avisos; optimizado también en Debug para que la simulación no sea lenta.
+    target_compile_options(Jolt PRIVATE -w $<$<CONFIG:Debug>:-O2>)
+endif()
+
+add_library(ge3d_physics STATIC physics/src/Physics.cpp)
+add_library(ge3d::physics ALIAS ge3d_physics)
+target_include_directories(ge3d_physics PUBLIC physics/include)
+target_link_libraries(ge3d_physics PUBLIC ge3d::runtime PRIVATE Jolt ge3d_options)
+
+# --- Audio: miniaudio 0.11.23 (dominio público o MIT-0), fijado por tag. Un solo archivo. ---
+FetchContent_Declare(miniaudio
+    GIT_REPOSITORY https://github.com/mackron/miniaudio.git
+    GIT_TAG 0.11.23
+    GIT_SHALLOW TRUE
+    SOURCE_SUBDIR unused
+)
+FetchContent_MakeAvailable(miniaudio)
+add_library(ge3d_audio STATIC audio/src/Audio.cpp audio/src/miniaudio.cpp)
+add_library(ge3d::audio ALIAS ge3d_audio)
+target_include_directories(ge3d_audio PUBLIC audio/include)
+target_include_directories(ge3d_audio SYSTEM PRIVATE "${miniaudio_SOURCE_DIR}")
+target_link_libraries(ge3d_audio PUBLIC ge3d::runtime PRIVATE ge3d_options)
+set_source_files_properties(audio/src/miniaudio.cpp PROPERTIES
+    COMPILE_OPTIONS "$<IF:$<CXX_COMPILER_ID:MSVC>,/W0,-w;$<$<CONFIG:Debug>:-O2>>")

@@ -256,6 +256,21 @@ std::vector<std::uint8_t> decodeBase64(const std::string& text, const std::strin
     return bytes;
 }
 
+const char* bodyTypeName(BodyType type) {
+    switch (type) {
+    case BodyType::dynamic: return "dynamic";
+    case BodyType::kinematic: return "kinematic";
+    case BodyType::trigger: return "trigger";
+    }
+    return "dynamic";
+}
+
+bool readBool(const Json& object, const char* key, const std::string& where) {
+    const auto& value = member(object, key, where);
+    if (!value.is_boolean()) fail(where + ": \"" + key + "\" debe ser true o false");
+    return value.get<bool>();
+}
+
 Json terrainJson(const Entity& entity) {
     const auto& settings = entity.terrain->settings;
     const auto& g = settings.generator;
@@ -322,6 +337,37 @@ std::string serializeScene(const Scene& scene) {
         }
         if (entity.terrain) item["terrain"] = terrainJson(entity);
         if (entity.heightmap) item["heightmap"] = heightmapJson(entity);
+        if (entity.body) {
+            Json body = Json::object();
+            body["type"] = bodyTypeName(entity.body->type);
+            body["mass"] = tidy(entity.body->mass);
+            body["friction"] = tidy(entity.body->friction);
+            body["restitution"] = tidy(entity.body->restitution);
+            item["body"] = std::move(body);
+        }
+        if (entity.audio) {
+            const auto& a = *entity.audio;
+            Json audio = Json::object();
+            audio["clip"] = a.clip;
+            audio["volume"] = tidy(a.volume);
+            audio["minDistance"] = tidy(a.minDistance);
+            audio["maxDistance"] = tidy(a.maxDistance);
+            audio["loop"] = a.loop;
+            audio["playOnStart"] = a.playOnStart;
+            audio["spatial"] = a.spatial;
+            item["audio"] = std::move(audio);
+        }
+        if (entity.player) {
+            const auto& p = *entity.player;
+            Json player = Json::object();
+            player["height"] = tidy(p.height);
+            player["radius"] = tidy(p.radius);
+            player["walkSpeed"] = tidy(p.walkSpeed);
+            player["runSpeed"] = tidy(p.runSpeed);
+            player["jumpSpeed"] = tidy(p.jumpSpeed);
+            player["mouseSensitivity"] = tidy(p.mouseSensitivity);
+            item["player"] = std::move(player);
+        }
         if (entity.script) {
             Json params = Json::object();
             for (const auto& [name, value] : entity.script->parameters) {
@@ -434,6 +480,50 @@ Scene parseSceneData(std::string_view text, bool generateTerrains) {
                 // Sin archivo, los vóxeles se generan con la configuración; loadSceneFile lee los guardados.
                 const auto settings = readTerrainSettings(terrainJson, terrainAt);
                 entity.terrain = generateTerrains ? makeTerrain(settings) : TerrainComponent{settings, nullptr};
+            }
+            if (number >= 6 && item.contains("body")) {
+                const auto& json = item["body"];
+                const std::string bodyAt = at + " (cuerpo fisico)";
+                if (!json.is_object()) fail(bodyAt + ": debe ser un objeto");
+                BodyComponent body;
+                const auto type = readString(json, "type", bodyAt);
+                if (type == "dynamic") body.type = BodyType::dynamic;
+                else if (type == "kinematic") body.type = BodyType::kinematic;
+                else if (type == "trigger") body.type = BodyType::trigger;
+                else fail(bodyAt + ": tipo desconocido \"" + type + "\"");
+                body.mass = static_cast<float>(readNumber(json, "mass", bodyAt, 0, 1.0e6));
+                body.friction = static_cast<float>(readNumber(json, "friction", bodyAt, 0, 10));
+                body.restitution = static_cast<float>(readNumber(json, "restitution", bodyAt, 0, 1));
+                entity.body = body;
+            }
+            if (number >= 6 && item.contains("audio")) {
+                const auto& json = item["audio"];
+                const std::string audioAt = at + " (audio)";
+                if (!json.is_object()) fail(audioAt + ": debe ser un objeto");
+                AudioSourceComponent audio;
+                audio.clip = readString(json, "clip", audioAt);
+                if (!audio.clip.empty() && !isValidSoundPath(audio.clip)) fail(audioAt + ": ruta de sonido invalida \"" + audio.clip + "\"");
+                audio.volume = static_cast<float>(readNumber(json, "volume", audioAt, 0, 4));
+                audio.minDistance = static_cast<float>(readNumber(json, "minDistance", audioAt, 0.01, 10000));
+                audio.maxDistance = static_cast<float>(readNumber(json, "maxDistance", audioAt, 0.01, 10000));
+                audio.loop = readBool(json, "loop", audioAt);
+                audio.playOnStart = readBool(json, "playOnStart", audioAt);
+                audio.spatial = readBool(json, "spatial", audioAt);
+                entity.audio = std::move(audio);
+            }
+            if (number >= 6 && item.contains("player")) {
+                const auto& json = item["player"];
+                const std::string playerAt = at + " (jugador)";
+                if (!json.is_object()) fail(playerAt + ": debe ser un objeto");
+                PlayerComponent player;
+                player.height = static_cast<float>(readNumber(json, "height", playerAt, 0.5, 10));
+                player.radius = static_cast<float>(readNumber(json, "radius", playerAt, 0.05, 2));
+                if (player.radius * 2 >= player.height) fail(playerAt + ": el radio debe ser menor que la mitad de la altura");
+                player.walkSpeed = static_cast<float>(readNumber(json, "walkSpeed", playerAt, 0, 100));
+                player.runSpeed = static_cast<float>(readNumber(json, "runSpeed", playerAt, 0, 100));
+                player.jumpSpeed = static_cast<float>(readNumber(json, "jumpSpeed", playerAt, 0, 100));
+                player.mouseSensitivity = static_cast<float>(readNumber(json, "mouseSensitivity", playerAt, 0.001, 10));
+                entity.player = player;
             }
             if (number >= 5 && item.contains("script")) {
                 const auto& scriptJson = item["script"];

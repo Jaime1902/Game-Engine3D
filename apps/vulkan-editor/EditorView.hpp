@@ -1,6 +1,8 @@
 #pragma once
 
+#include "ge3d/Audio.hpp"
 #include "ge3d/History.hpp"
+#include "ge3d/Physics.hpp"
 #include "ge3d/Materials.hpp"
 #include "ge3d/Scene.hpp"
 #include "ge3d/ScriptHost.hpp"
@@ -48,11 +50,18 @@ public:
         float farPlane{};
     };
 
-    explicit EditorView(float uiScale = 1.0f);
+    explicit EditorView(float uiScale = 1.0f, std::filesystem::path initialScene = {});
     ~EditorView();
     void draw(ImTextureID sceneTexture);
     [[nodiscard]] SceneView sceneView() const;
     [[nodiscard]] glm::vec3 cameraPosition() const;
+    // Jugador en primera persona: la ventana captura el ratón y pasa su movimiento al editor.
+    [[nodiscard]] bool wantsMouseCapture() const { return mouseCaptured_; }
+    void setCapturedMouse(float dx, float dy, bool click) {
+        capturedDelta_ += glm::vec2{dx, dy};
+        capturedClick_ = capturedClick_ || click;
+    }
+    void releaseMouse() { mouseCaptured_ = false; }
     [[nodiscard]] const RenderStyle& renderStyle() const { return style_; }
     // Tamaño que la vista necesita (puede superar la capacidad actual de las imágenes).
     [[nodiscard]] glm::uvec2 requestedSceneExtent() const { return requestedExtent_; }
@@ -193,6 +202,22 @@ private:
     [[nodiscard]] std::optional<std::string> readScript(const std::string& path) const;
     [[nodiscard]] std::filesystem::path scriptFile(const std::string& path) const;
 
+    // Play (EditorPlay.cpp): física, audio y jugador en primera persona.
+    enum class Special { player, zone, sound };
+    void startPlaySystems();
+    void stopPlaySystems();
+    void updatePlay(float dt);
+    void interactAhead();
+    void drawPlayOverlay(ImDrawList* draw, ImVec2 origin, ImVec2 size);
+    void createSpecial(Special kind);
+    [[nodiscard]] glm::vec3 fpForward() const;
+    bool editFloat(const char* label, float& value, float speed, float minimum, float maximum, const char* format,
+                   const ge3d::Entity& frameStart, float labelWidth);
+    bool editBool(const char* label, bool& value, const ge3d::Entity& frameStart, float labelWidth);
+    void drawBodyComponent(ge3d::Entity& entity, const ge3d::Entity& frameStart);
+    void drawAudioComponent(ge3d::Entity& entity, const ge3d::Entity& frameStart);
+    void drawPlayerComponent(ge3d::Entity& entity, const ge3d::Entity& frameStart);
+
     // Paneles
     void drawMenuBar();
     void drawToolbar();
@@ -322,6 +347,17 @@ private:
     bool codeFocused_ = false;                    // Ctrl+S guarda el script, no la escena                    // fotogramas en los que traer la Escena al frente
 
     std::unique_ptr<ge3d::ScriptHost> scripts_;
+    std::unique_ptr<ge3d::PhysicsWorld> physics_;
+    std::unique_ptr<ge3d::AudioSystem> audio_;
+    bool firstPerson_ = false;
+    bool mouseCaptured_ = false;
+    glm::vec3 fpEye_{0.0f};
+    float fpYaw_ = 0.0f;
+    float fpPitch_ = 0.0f;
+    glm::vec2 capturedDelta_{0.0f};
+    bool capturedClick_ = false;
+    float footstepTimer_ = 0.0f;
+    std::vector<std::string> soundList_;
     std::vector<CodeDocument> documents_;
     int selectDocument_ = -1;                     // pestaña a seleccionar en el siguiente fotograma
     int closingDocument_ = -1;                    // pestaña con cambios que se pidió cerrar

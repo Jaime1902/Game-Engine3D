@@ -4,7 +4,7 @@ Motor de escritorio para construir, programar y jugar escenas 3D pixel art desde
 
 ## Estado del repositorio
 
-El runtime C++ organiza cada objeto en componentes (Transformación, Forma, Terreno y Terreno de vóxeles), genera y malla terrenos de malla y de vóxeles, carga materiales con texturas PNG, guarda y abre escenas en JSON y lleva un historial de deshacer y rehacer. El editor Vulkan tiene la distribución clásica de un editor de escenas: Jerarquía, Escena, Inspector, Proyecto y Consola, con barra de herramientas y modo Play. El jugador de consola permite comprobar el arranque del runtime. Los objetos se programan con scripts Luau desde la pestaña Código y se prueban en Play. La física y el audio corresponden a la etapa 4. El avance por etapas está en [docs/roadmap.md](docs/roadmap.md).
+El runtime C++ organiza cada objeto en componentes (Transformación, Forma, Terreno y Terreno de vóxeles), genera y malla terrenos de malla y de vóxeles, carga materiales con texturas PNG, guarda y abre escenas en JSON y lleva un historial de deshacer y rehacer. El editor Vulkan tiene la distribución clásica de un editor de escenas: Jerarquía, Escena, Inspector, Proyecto y Consola, con barra de herramientas y modo Play. El jugador de consola permite comprobar el arranque del runtime. Los objetos se programan con scripts Luau desde la pestaña Código y se prueban en Play, con física (Jolt), sonido 3D (miniaudio) y un jugador en primera persona. El avance por etapas está en [docs/roadmap.md](docs/roadmap.md).
 
 ## Compilación
 
@@ -14,6 +14,7 @@ Todo se hace con `build.bat` desde la raíz del proyecto, en CMD o PowerShell, o
 
 ```bat
 build              :: compila el editor grafico y lo abre
+build demo         :: igual, con la escena de prueba de fisica, sonido y jugador
 build all          :: compila la base, ejecuta las pruebas y el editor de consola
 build test         :: solo las pruebas
 build run-player   :: player de consola
@@ -70,6 +71,25 @@ Las caras y los vóxeles no guardan colores sino **materiales**, definidos en `p
 - Al guardar `materials.json` o cualquier PNG, el editor recarga las texturas solo (en menos de un segundo). Un id desconocido o un PNG que no carga se ve con cuadros magenta y aparece un aviso en la Consola.
 - `ge3d_texture_gen <carpeta Content>` regenera el juego de texturas inicial (no sobrescribe archivos existentes salvo con `--force`).
 
+### Física, sonido y jugador en primera persona
+
+**Para probarlo rápido:** `build demo` abre `scenes/demo_fisica.scene.json` (una habitación con rampa, plataforma, cajas, una puerta programada, una fuente con sonido y música fuera). Pulsa **Play** y haz clic en la vista:
+
+| Tecla | Acción |
+|---|---|
+| **W A S D** | Andar · **Shift**: correr |
+| **Ratón** | Mirar |
+| **Espacio** | Saltar (en el agua, nadar hacia arriba) |
+| **E** o **clic** | Usar lo que hay delante (por ejemplo, abrir la puerta) |
+| **Esc** | Soltar el ratón (clic en la vista para volver) · **Ctrl+P**: detener |
+
+- **Colisiones sin configurar nada:** las piezas (cajas, rampas) y los terrenos son suelo y paredes. Se sube por rampas y escalones de hasta 45 cm.
+- **Agregar componente → Cuerpo físico:** *Dinámico* cae, choca, se empuja y flota en el agua del terreno; *Cinemático* lo mueve un script y empuja a los demás; *Zona (trigger)* no choca y avisa a los scripts con `onTriggerEnter` / `onTriggerExit` (como la campana de la demo).
+- **Fuente de audio:** un WAV de `Content/sounds` en bucle o una vez, con volumen y distancias. En 3D se oye a volumen completo dentro de la distancia mínima y deja de oírse en la máxima: al acercarte a la fuente de la demo sube el sonido del agua. **>** lo escucha desde el Inspector.
+- **Jugador:** **Objeto → Jugador (primera persona)** coloca dónde aparece (la flecha verde indica hacia dónde mira). Sin Jugador, Play usa la cámara del editor y la física funciona igual.
+- **Scripts:** `entity.velocity`, `entity:applyImpulse(v)`, `entity:playSound(clip)`, `audio.play(clip)`, `scene.player()` y los callbacks `onTriggerEnter`, `onTriggerExit` y `onCollision`.
+- `ge3d_sound_gen <carpeta Content>` regenera los sonidos de ejemplo (sintetizados, WAV de 16 bits a 44,1 kHz).
+
 ### Scripts (Luau)
 
 Un script es un archivo `.luau` en `projects/pueblo/Content/scripts` que devuelve una tabla con sus parámetros y callbacks. El de ejemplo es la puerta:
@@ -93,7 +113,7 @@ return Puerta
 2. Selecciona un objeto, **Agregar componente → Script** y elige el script. El Inspector muestra sus parámetros; cada objeto puede tener valores distintos (la **x** vuelve al valor del script).
 3. Pulsa **Play** y haz clic en el objeto. Si guardas el script durante Play se recarga al momento; si tiene errores sigue funcionando la versión anterior. Al detener, todo vuelve como estaba.
 
-API: `self.entity` (position, rotation, scale como `vector`, name, `send`), `scene.find(nombre)`, `scene.send(nombre, evento, valor)`, `scene.time()`, `input.isDown("E")` / `input.wasPressed("Space")`, `log(...)`; callbacks `onStart`, `onUpdate`, `onInteract`, `onMessage`, `onStop`. El botón **API** de la pestaña Código tiene la referencia completa. Los scripts no tienen acceso a archivos ni al sistema; cada llamada tiene 1 ms y todos juntos 3,5 ms por fotograma: un bucle sin fin se interrumpe, se informa en la Consola con su traza y ese script se desactiva hasta detener Play.
+API: `self.entity` (position, rotation, scale como `vector`, name, `send`), `scene.find(nombre)`, `scene.send(nombre, evento, valor)`, `scene.time()`, `input.isDown("E")` / `input.wasPressed("Space")`, `log(...)`; callbacks `onStart`, `onUpdate`, `onInteract`, `onMessage`, `onStop`. El botón **API** de la pestaña Código tiene la referencia completa. Los scripts no tienen acceso a archivos ni al sistema; cada llamada tiene 1 ms (20 ms `onStart`) y todos juntos 3,5 ms por fotograma: un bucle sin fin se interrumpe, se informa en la Consola con su traza y ese script se desactiva hasta detener Play.
 
 ### Estilo pixel art
 

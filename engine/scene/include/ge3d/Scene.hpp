@@ -90,6 +90,47 @@ struct ScriptComponent {
 // Ruta de script válida: relativa, sin "..", con extensión .luau.
 [[nodiscard]] bool isValidScriptPath(const std::string& path);
 
+// --- Física y audio (etapa 4) ---------------------------------------------------------------------
+// Las piezas (Forma) y los terrenos sin cuerpo físico son colisionadores estáticos: suelo y paredes.
+// El componente Cuerpo físico las hace dinámicas (caen y se empujan), cinemáticas (las mueve un script)
+// o zonas (no chocan; avisan a los scripts con onTriggerEnter / onTriggerExit).
+enum class BodyType { dynamic, kinematic, trigger };
+
+struct BodyComponent {
+    BodyType type{BodyType::dynamic};
+    float mass{0.0f};           // kg; 0 = según el volumen (caja de madera hueca: 150 kg/m³)
+    float friction{0.6f};
+    float restitution{0.1f};    // rebote (0-1)
+    friend bool operator==(const BodyComponent&, const BodyComponent&) = default;
+};
+
+// Sonido en un archivo WAV de Content (p. ej. "sounds/fuente.wav"). Con spatial, suena desde la
+// entidad y se atenúa con la distancia al oyente (la cámara o el jugador).
+struct AudioSourceComponent {
+    std::string clip;
+    float volume{1.0f};
+    float minDistance{2.0f};    // metros a volumen completo
+    float maxDistance{30.0f};   // metros a partir de los que ya no se oye
+    bool loop{true};
+    bool playOnStart{true};
+    bool spatial{true};
+    friend bool operator==(const AudioSourceComponent&, const AudioSourceComponent&) = default;
+};
+
+// Jugador en primera persona: en Play aparece donde está la entidad y la cámara pasa a sus ojos.
+struct PlayerComponent {
+    float height{1.75f};
+    float radius{0.3f};
+    float walkSpeed{4.0f};
+    float runSpeed{7.0f};
+    float jumpSpeed{5.0f};
+    float mouseSensitivity{0.12f};
+    friend bool operator==(const PlayerComponent&, const PlayerComponent&) = default;
+};
+
+// Ruta de sonido válida: relativa, sin "..", .wav.
+[[nodiscard]] bool isValidSoundPath(const std::string& path);
+
 struct Entity {
     EntityId id{};
     Uuid uuid{};
@@ -99,6 +140,9 @@ struct Entity {
     std::optional<TerrainComponent> terrain;
     std::optional<HeightmapComponent> heightmap;
     std::optional<ScriptComponent> script;
+    std::optional<BodyComponent> body;
+    std::optional<AudioSourceComponent> audio;
+    std::optional<PlayerComponent> player;
     friend bool operator==(const Entity&, const Entity&) = default;
 };
 

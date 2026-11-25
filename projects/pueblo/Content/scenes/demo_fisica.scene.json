@@ -1,0 +1,628 @@
+{
+  "format": "ge3d.scene",
+  "version": 6,
+  "entities": [
+    {
+      "uuid": "c0f39c03-10b9-4f85-9a5c-1692408ab4b2",
+      "name": "Suelo",
+      "transform": {
+        "position": [
+          0,
+          -0.5,
+          0
+        ],
+        "rotationDegrees": [
+          0,
+          0,
+          0
+        ],
+        "scale": [
+          24,
+          1,
+          24
+        ]
+      },
+      "shape": {
+        "primitive": "box",
+        "materials": [
+          "adoquin",
+          "adoquin",
+          "adoquin",
+          "adoquin",
+          "adoquin",
+          "adoquin"
+        ]
+      }
+    },
+    {
+      "uuid": "b2923c52-8c34-4b36-a74b-1dba92f17ae1",
+      "name": "Pared norte",
+      "transform": {
+        "position": [
+          0,
+          1.5,
+          -10
+        ],
+        "rotationDegrees": [
+          0,
+          0,
+          0
+        ],
+        "scale": [
+          20,
+          3,
+          0.5
+        ]
+      },
+      "shape": {
+        "primitive": "box",
+        "materials": [
+          "ladrillo",
+          "ladrillo",
+          "ladrillo",
+          "ladrillo",
+          "ladrillo",
+          "ladrillo"
+        ]
+      }
+    },
+    {
+      "uuid": "e641bffd-af39-4f1f-8e0b-18fd13ce5c71",
+      "name": "Pared oeste",
+      "transform": {
+        "position": [
+          -10,
+          1.5,
+          0
+        ],
+        "rotationDegrees": [
+          0,
+          0,
+          0
+        ],
+        "scale": [
+          0.5,
+          3,
+          20
+        ]
+      },
+      "shape": {
+        "primitive": "box",
+        "materials": [
+          "ladrillo",
+          "ladrillo",
+          "ladrillo",
+          "ladrillo",
+          "ladrillo",
+          "ladrillo"
+        ]
+      }
+    },
+    {
+      "uuid": "2d389e6f-c38a-42d5-ae73-974c455b4258",
+      "name": "Pared este",
+      "transform": {
+        "position": [
+          10,
+          1.5,
+          0
+        ],
+        "rotationDegrees": [
+          0,
+          0,
+          0
+        ],
+        "scale": [
+          0.5,
+          3,
+          20
+        ]
+      },
+      "shape": {
+        "primitive": "box",
+        "materials": [
+          "ladrillo",
+          "ladrillo",
+          "ladrillo",
+          "ladrillo",
+          "ladrillo",
+          "ladrillo"
+        ]
+      }
+    },
+    {
+      "uuid": "3735e24a-d27f-4c52-9fbd-b1d9bfb6917e",
+      "name": "Pared sur izquierda",
+      "transform": {
+        "position": [
+          -5.5,
+          1.5,
+          10
+        ],
+        "rotationDegrees": [
+          0,
+          0,
+          0
+        ],
+        "scale": [
+          9,
+          3,
+          0.5
+        ]
+      },
+      "shape": {
+        "primitive": "box",
+        "materials": [
+          "ladrillo",
+          "ladrillo",
+          "ladrillo",
+          "ladrillo",
+          "ladrillo",
+          "ladrillo"
+        ]
+      }
+    },
+    {
+      "uuid": "fe884a2b-30cf-445b-834e-b300bc837420",
+      "name": "Pared sur derecha",
+      "transform": {
+        "position": [
+          5.5,
+          1.5,
+          10
+        ],
+        "rotationDegrees": [
+          0,
+          0,
+          0
+        ],
+        "scale": [
+          9,
+          3,
+          0.5
+        ]
+      },
+      "shape": {
+        "primitive": "box",
+        "materials": [
+          "ladrillo",
+          "ladrillo",
+          "ladrillo",
+          "ladrillo",
+          "ladrillo",
+          "ladrillo"
+        ]
+      }
+    },
+    {
+      "uuid": "51a4f09b-5505-4801-adb6-99f6467259cc",
+      "name": "Dintel",
+      "transform": {
+        "position": [
+          0,
+          2.75,
+          10
+        ],
+        "rotationDegrees": [
+          0,
+          0,
+          0
+        ],
+        "scale": [
+          2,
+          0.5,
+          0.5
+        ]
+      },
+      "shape": {
+        "primitive": "box",
+        "materials": [
+          "ladrillo",
+          "ladrillo",
+          "ladrillo",
+          "ladrillo",
+          "ladrillo",
+          "ladrillo"
+        ]
+      }
+    },
+    {
+      "uuid": "5ebcfb48-25b9-4b01-aa36-0d1ce1575079",
+      "name": "Puerta",
+      "transform": {
+        "position": [
+          0,
+          1.25,
+          10
+        ],
+        "rotationDegrees": [
+          0,
+          0,
+          0
+        ],
+        "scale": [
+          2,
+          2.5,
+          0.2
+        ]
+      },
+      "shape": {
+        "primitive": "box",
+        "materials": [
+          "tablones",
+          "tablones",
+          "tablones",
+          "tablones",
+          "tablones",
+          "tablones"
+        ]
+      },
+      "script": {
+        "path": "scripts/puerta.luau",
+        "enabled": true,
+        "params": {
+          "velocidad": 120.0
+        }
+      }
+    },
+    {
+      "uuid": "ad95c98a-38ca-44b4-9595-834d278f91c4",
+      "name": "Plataforma",
+      "transform": {
+        "position": [
+          -6,
+          1,
+          -7.5
+        ],
+        "rotationDegrees": [
+          0,
+          0,
+          0
+        ],
+        "scale": [
+          4,
+          2,
+          4
+        ]
+      },
+      "shape": {
+        "primitive": "box",
+        "materials": [
+          "piedra",
+          "piedra",
+          "piedra",
+          "piedra",
+          "piedra",
+          "piedra"
+        ]
+      }
+    },
+    {
+      "uuid": "ce151131-5073-49f3-a51c-76008ea3e35e",
+      "name": "Rampa",
+      "transform": {
+        "position": [
+          -6,
+          1,
+          -3.5
+        ],
+        "rotationDegrees": [
+          0,
+          0,
+          0
+        ],
+        "scale": [
+          3,
+          2,
+          4
+        ]
+      },
+      "shape": {
+        "primitive": "ramp",
+        "materials": [
+          "tablones",
+          "tablones",
+          "tablones",
+          "tablones",
+          "tablones",
+          "tablones"
+        ]
+      }
+    },
+    {
+      "uuid": "58e56fa6-ffd1-437d-b12f-7aebdeaf200d",
+      "name": "Campana",
+      "transform": {
+        "position": [
+          -6,
+          3,
+          -7.5
+        ],
+        "rotationDegrees": [
+          0,
+          0,
+          0
+        ],
+        "scale": [
+          3,
+          2,
+          3
+        ]
+      },
+      "body": {
+        "type": "trigger",
+        "mass": 0,
+        "friction": 0.6,
+        "restitution": 0.1
+      },
+      "script": {
+        "path": "scripts/campana.luau",
+        "enabled": true,
+        "params": {}
+      }
+    },
+    {
+      "uuid": "227fc3d1-4335-4eed-a333-9210be1309c6",
+      "name": "Caja 1",
+      "transform": {
+        "position": [
+          3,
+          0.5,
+          -3
+        ],
+        "rotationDegrees": [
+          0,
+          0,
+          0
+        ],
+        "scale": [
+          1,
+          1,
+          1
+        ]
+      },
+      "shape": {
+        "primitive": "box",
+        "materials": [
+          "tablones",
+          "tablones",
+          "tablones",
+          "tablones",
+          "tablones",
+          "tablones"
+        ]
+      },
+      "body": {
+        "type": "dynamic",
+        "mass": 0,
+        "friction": 0.6,
+        "restitution": 0.1
+      }
+    },
+    {
+      "uuid": "14ca8f9d-1672-4c14-a423-ba922c32b028",
+      "name": "Caja 2",
+      "transform": {
+        "position": [
+          4.1,
+          0.5,
+          -3
+        ],
+        "rotationDegrees": [
+          0,
+          0,
+          0
+        ],
+        "scale": [
+          1,
+          1,
+          1
+        ]
+      },
+      "shape": {
+        "primitive": "box",
+        "materials": [
+          "tablones",
+          "tablones",
+          "tablones",
+          "tablones",
+          "tablones",
+          "tablones"
+        ]
+      },
+      "body": {
+        "type": "dynamic",
+        "mass": 0,
+        "friction": 0.6,
+        "restitution": 0.1
+      }
+    },
+    {
+      "uuid": "6489f8d9-ebc4-4157-ba48-4b3f3790bdff",
+      "name": "Caja 3",
+      "transform": {
+        "position": [
+          3.5,
+          1.5,
+          -3
+        ],
+        "rotationDegrees": [
+          0,
+          0,
+          0
+        ],
+        "scale": [
+          1,
+          1,
+          1
+        ]
+      },
+      "shape": {
+        "primitive": "box",
+        "materials": [
+          "tablones",
+          "tablones",
+          "tablones",
+          "tablones",
+          "tablones",
+          "tablones"
+        ]
+      },
+      "body": {
+        "type": "dynamic",
+        "mass": 0,
+        "friction": 0.6,
+        "restitution": 0.1
+      }
+    },
+    {
+      "uuid": "946e5be6-c803-430e-93e1-dc60bf777239",
+      "name": "Caja 4",
+      "transform": {
+        "position": [
+          5,
+          0.5,
+          2
+        ],
+        "rotationDegrees": [
+          0,
+          0,
+          0
+        ],
+        "scale": [
+          1,
+          1,
+          1
+        ]
+      },
+      "shape": {
+        "primitive": "box",
+        "materials": [
+          "tablones",
+          "tablones",
+          "tablones",
+          "tablones",
+          "tablones",
+          "tablones"
+        ]
+      },
+      "body": {
+        "type": "dynamic",
+        "mass": 0,
+        "friction": 0.6,
+        "restitution": 0.1
+      }
+    },
+    {
+      "uuid": "2fb4a2a5-ca61-42ef-bf73-85d1914d79a7",
+      "name": "Fuente",
+      "transform": {
+        "position": [
+          6,
+          0.4,
+          6
+        ],
+        "rotationDegrees": [
+          0,
+          0,
+          0
+        ],
+        "scale": [
+          1.6,
+          0.8,
+          1.6
+        ]
+      },
+      "shape": {
+        "primitive": "box",
+        "materials": [
+          "piedra",
+          "piedra",
+          "piedra",
+          "piedra",
+          "piedra",
+          "piedra"
+        ]
+      },
+      "audio": {
+        "clip": "sounds/fuente.wav",
+        "volume": 1.0,
+        "minDistance": 1.5,
+        "maxDistance": 14.0,
+        "loop": true,
+        "playOnStart": true,
+        "spatial": true
+      }
+    },
+    {
+      "uuid": "b3cf0e15-eb3e-4bd1-bef0-c268424d7db3",
+      "name": "Caja de musica",
+      "transform": {
+        "position": [
+          0,
+          0.3,
+          16
+        ],
+        "rotationDegrees": [
+          0,
+          0,
+          0
+        ],
+        "scale": [
+          0.6,
+          0.6,
+          0.6
+        ]
+      },
+      "shape": {
+        "primitive": "box",
+        "materials": [
+          "teja",
+          "teja",
+          "teja",
+          "teja",
+          "teja",
+          "teja"
+        ]
+      },
+      "audio": {
+        "clip": "sounds/musica_caja.wav",
+        "volume": 0.7,
+        "minDistance": 2.0,
+        "maxDistance": 12.0,
+        "loop": true,
+        "playOnStart": true,
+        "spatial": true
+      }
+    },
+    {
+      "uuid": "a3c7c16e-e0fc-47ee-878f-49f590ea733b",
+      "name": "Jugador",
+      "transform": {
+        "position": [
+          0,
+          0,
+          5
+        ],
+        "rotationDegrees": [
+          0,
+          0,
+          0
+        ],
+        "scale": [
+          1,
+          1,
+          1
+        ]
+      },
+      "player": {
+        "height": 1.75,
+        "radius": 0.3,
+        "walkSpeed": 4,
+        "runSpeed": 7,
+        "jumpSpeed": 5,
+        "mouseSensitivity": 0.12
+      }
+    }
+  ]
+}

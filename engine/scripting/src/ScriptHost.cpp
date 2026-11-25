@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <map>
+#include <string_view>
 
 namespace ge3d {
 
@@ -17,7 +18,8 @@ namespace {
 using Clock = std::chrono::steady_clock;
 constexpr const char* entityType = "ge3d.Entity";
 constexpr std::size_t maxMessagesPerFrame = 1024;
-constexpr const char* callbackNames[] = {"onStart", "onUpdate", "onInteract", "onMessage", "onStop"};
+constexpr const char* callbackNames[] = {"onStart", "onUpdate", "onInteract", "onMessage", "onTriggerEnter", "onTriggerExit",
+                                         "onCollision", "onStop"};
 
 // "scripts/puerta.luau:12: mensaje" o ":12: mensaje" -> línea 12 y "mensaje".
 ScriptDiagnostic parseDiagnostic(const std::string& path, const std::string& text) {
@@ -113,6 +115,7 @@ struct ScriptHost::Impl {
         std::optional<ScriptValue> value;
     };
     std::vector<Message> messages;
+    ScriptServices services;
     std::size_t nextInstance{};
     double frameMs{};
 
@@ -221,6 +224,35 @@ int entitySend(lua_State* L) {
     return 0;
 }
 
+int entityApplyImpulse(lua_State* L) {
+    const auto& entity = checkEntity(L, 1);
+    const auto impulse = checkVector(L, 2, "el impulso");
+    if (auto* impl = implOf(L); impl->services.applyImpulse) impl->services.applyImpulse(entity.id, impulse);
+    return 0;
+}
+
+int entityPlaySound(lua_State* L) {
+    const auto& entity = checkEntity(L, 1);
+    const std::string clip = luaL_checkstring(L, 2);
+    const double volume = luaL_optnumber(L, 3, 1.0);
+    if (auto* impl = implOf(L); impl->services.playSound) {
+        impl->services.playSound(clip, static_cast<float>(volume), entity.transform.position);
+    }
+    return 0;
+}
+
+int entityPlayAudio(lua_State* L) {
+    const auto& entity = checkEntity(L, 1);
+    if (auto* impl = implOf(L); impl->services.emitter) impl->services.emitter(entity.id, true);
+    return 0;
+}
+
+int entityStopAudio(lua_State* L) {
+    const auto& entity = checkEntity(L, 1);
+    if (auto* impl = implOf(L); impl->services.emitter) impl->services.emitter(entity.id, false);
+    return 0;
+}
+
 int entityIndex(lua_State* L) {
     auto& entity = checkEntity(L, 1);
     const std::string key = luaL_checkstring(L, 2);
@@ -231,7 +263,17 @@ int entityIndex(lua_State* L) {
     else if (key == "name") lua_pushstring(L, entity.name.c_str());
     else if (key == "id") lua_pushnumber(L, static_cast<double>(entity.id));
     else if (key == "send") lua_pushcfunction(L, entitySend, "send");
-    else luaL_error(L, "Entity no tiene el campo '%s' (position, rotation, scale, name, id, send)", key.c_str());
+    else if (key == "velocity") {
+        auto* impl = implOf(L);
+        const auto v = impl->services.velocity ? impl->services.velocity(entity.id) : std::nullopt;
+        if (v) push(*v);
+        else lua_pushvector(L, 0, 0, 0);
+    } else if (key == "applyImpulse") lua_pushcfunction(L, entityApplyImpulse, "applyImpulse");
+    else if (key == "playSound") lua_pushcfunction(L, entityPlaySound, "playSound");
+    else if (key == "playAudio") lua_pushcfunction(L, entityPlayAudio, "playAudio");
+    else if (key == "stopAudio") lua_pushcfunction(L, entityStopAudio, "stopAudio");
+    else luaL_error(L, "Entity no tiene el campo '%s' (position, rotation, scale, velocity, name, id, send, applyImpulse, "
+                       "playSound, playAudio, stopAudio)", key.c_str());
     return 1;
 }
 
@@ -244,6 +286,9 @@ int entityNewIndex(lua_State* L) {
         const auto scale = checkVector(L, 3, "scale");
         if (!(scale.x > 0 && scale.y > 0 && scale.z > 0)) luaL_error(L, "la escala debe ser mayor que cero");
         entity.transform.scale = scale;
+    } else if (key == "velocity") {
+        const auto v = checkVector(L, 3, "velocity");
+        if (auto* impl = implOf(L); impl->services.setVelocity) impl->services.setVelocity(entity.id, v);
     } else if (key == "name") entity.name = luaL_checkstring(L, 3);
     else luaL_error(L, "no se puede cambiar '%s' de una Entity", key.c_str());
     return 0;
@@ -310,6 +355,21 @@ int sceneTime(lua_State* L) {
     return 1;
 }
 
+int scenePlayer(lua_State* L) {
+    auto* impl = implOf(L);
+    const EntityId id = impl->services.player ? impl->services.player() : EntityId{};
+    if (id && impl->scene && impl->scene->find(id)) pushEntity(L, id);
+    else lua_pushnil(L);
+    return 1;
+}
+
+int audioPlay(lua_State* L) {
+    const std::string clip = luaL_checkstring(L, 1);
+    const double volume = luaL_optnumber(L, 2, 1.0);
+    if (auto* impl = implOf(L); impl->services.playSound) impl->services.playSound(clip, static_cast<float>(volume), std::nullopt);
+    return 0;
+}
+
 int inputCheck(lua_State* L, bool pressed) {
     const std::string key = luaL_checkstring(L, 1);
     const auto& list = pressed ? implOf(L)->input.pressed : implOf(L)->input.down;
@@ -356,7 +416,11 @@ bool ScriptHost::Impl::open() {
     setFunction(L, "find", sceneFind);
     setFunction(L, "send", sceneSend);
     setFunction(L, "time", sceneTime);
+    setFunction(L, "player", scenePlayer);
     lua_setglobal(L, "scene");
+    lua_newtable(L);
+    setFunction(L, "play", audioPlay);
+    lua_setglobal(L, "audio");
     lua_newtable(L);
     setFunction(L, "isDown", inputIsDown);
     setFunction(L, "wasPressed", inputWasPressed);
@@ -417,7 +481,7 @@ std::optional<int> ScriptHost::Impl::loadModule(const std::string& path, std::ve
     }
     std::string error;
     // El cuerpo del script solo declara funciones y parámetros: tiene un presupuesto más holgado.
-    if (!callProtected(thread, 0, 1, 20.0, error)) {
+    if (!callProtected(thread, 0, 1, startBudgetMs, error)) {
         lua_pop(L, 1);
         return fail(error);
     }
@@ -515,7 +579,8 @@ bool ScriptHost::Impl::call(Instance& instance, const char* callback, int args) 
     const Instance* previous = current;
     current = &instance;
     std::string error;
-    const bool ok = callProtected(L, 1 + args, 0, callBudgetMs, error);
+    const double budget = std::string_view(callback) == "onStart" ? startBudgetMs : callBudgetMs;
+    const bool ok = callProtected(L, 1 + args, 0, budget, error);
     current = previous;
     if (!ok) disable(instance, callback, error);
     return true;
@@ -654,6 +719,23 @@ bool ScriptHost::reload(Scene& scene, const std::string& path, std::vector<Scrip
     impl.nextInstance = 0;
     impl.report(false, "Script " + path + " recargado (" + std::to_string(recreate.size()) + " instancias)");
     return true;
+}
+
+void ScriptHost::setServices(ScriptServices services) {
+    impl_->services = std::move(services);
+}
+
+void ScriptHost::notify(Scene& scene, EntityId self, const char* callback, EntityId other, double value) {
+    auto& impl = *impl_;
+    if (!impl.L) return;
+    impl.scene = &scene;
+    for (auto& instance : impl.instances) {
+        if (instance.entity != self) continue;
+        if (other && scene.find(other)) pushEntity(impl.L, other);
+        else lua_pushnil(impl.L);
+        lua_pushnumber(impl.L, value);
+        impl.call(instance, callback, 2);
+    }
 }
 
 void ScriptHost::setParameter(EntityId entity, const std::string& name, const ScriptValue& value) {

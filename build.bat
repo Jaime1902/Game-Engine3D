@@ -6,6 +6,7 @@ rem  Uso:  build [accion] [msvc]
 rem
 rem  Acciones:
 rem    editor       compila el editor grafico Vulkan y lo abre   (por defecto)
+rem    demo         igual, abriendo la escena de prueba de fisica y sonido
 rem    all          compila la base, ejecuta las pruebas y el editor de consola
 rem    configure    solo configura CMake
 rem    build        solo compila la base
@@ -67,7 +68,7 @@ if not defined VULKAN_SDK (
 
 set "ERR=0"
 pushd "%ROOT%"
-for %%A in (editor all configure build test run-player vulkan clean help) do (
+for %%A in (editor demo all configure build test run-player vulkan clean help) do (
     if /i "%ACTION%"=="%%A" goto :act_%%A
 )
 echo Accion desconocida: %ACTION%
@@ -76,8 +77,9 @@ set "ERR=2"
 goto :act_help
 
 :act_help
-echo Uso: build [editor^|all^|configure^|build^|test^|run-player^|vulkan^|clean^|help] [msvc]
+echo Uso: build [editor^|demo^|all^|configure^|build^|test^|run-player^|vulkan^|clean^|help] [msvc]
 echo   editor      compila el editor grafico Vulkan y lo abre (por defecto)
+echo   demo        igual, con la escena de prueba (jugador, fisica y sonido)
 echo   all         compila la base, ejecuta las pruebas y el editor de consola
 echo   configure   solo configura CMake
 echo   build       solo compila la base
@@ -125,6 +127,16 @@ call :step "Compilacion Vulkan" cmake --build --preset %VULKAN_PRESET% || goto :
 echo.
 echo Abriendo el editor... (los mensajes aparecen aqui y en la Consola del editor)
 call :step "Editor" "%VULKAN_DIR%\apps\vulkan-editor%CONFIG_DIR%\ge3d_vulkan_editor.exe" || goto :done
+goto :done
+
+:act_demo
+call :need_vulkan || goto :done
+call :step "Configuracion Vulkan" cmake --preset %VULKAN_PRESET% || goto :done
+call :step "Compilacion Vulkan" cmake --build --preset %VULKAN_PRESET% || goto :done
+echo.
+echo Abriendo la escena de prueba: pulsa Play (o Ctrl+P) y haz clic en la vista.
+echo WASD andar, raton mirar, Espacio saltar, Shift correr, E o clic interactuar, Esc soltar el raton.
+call :step "Editor" "%VULKAN_DIR%\apps\vulkan-editor%CONFIG_DIR%\ge3d_vulkan_editor.exe" "%ROOT%projects\pueblo\Content\scenes\demo_fisica.scene.json" || goto :done
 goto :done
 
 :act_clean

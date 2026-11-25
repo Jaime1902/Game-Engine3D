@@ -40,6 +40,17 @@ struct ScriptInput {
     std::vector<std::string> pressed;
 };
 
+// Servicios del motor que los scripts pueden usar (física y audio). Los pone quien ejecuta Play;
+// sin ellos, esas funciones no hacen nada.
+struct ScriptServices {
+    std::function<std::optional<Vec3>(EntityId)> velocity;
+    std::function<void(EntityId, Vec3)> setVelocity;
+    std::function<void(EntityId, Vec3)> applyImpulse;
+    std::function<void(const std::string& clip, float volume, std::optional<Vec3> position)> playSound;
+    std::function<void(EntityId, bool play)> emitter;
+    std::function<EntityId()> player;
+};
+
 // Ejecuta los ScriptComponent de una escena en modo Play.
 //
 // Cada Play crea una VM de Luau nueva y Stop la destruye entera: ningún estado de script sobrevive.
@@ -53,6 +64,8 @@ public:
     using LogSink = std::function<void(bool error, const std::string& message)>;
 
     static constexpr double callBudgetMs = 1.0;
+    // onStart (y el cuerpo del script) preparan el estado una vez: tienen más margen.
+    static constexpr double startBudgetMs = 20.0;
     static constexpr double frameBudgetMs = 3.5;
     static constexpr std::size_t memoryLimit = 64u * 1024u * 1024u;
 
@@ -72,6 +85,11 @@ public:
     // Recompila un script cambiado. Si falla, las instancias siguen con la versión anterior; si va bien,
     // se recrean (estado privado nuevo, mismos parámetros) y se llama a su onStart.
     bool reload(Scene& scene, const std::string& path, std::vector<ScriptDiagnostic>* diagnostics = nullptr);
+
+    void setServices(ScriptServices services);
+    // Llama a un callback con otra entidad y un número, p. ej. onTriggerEnter(self, otro) u
+    // onCollision(self, otro, velocidad). Si la entidad no tiene script o ese callback, no hace nada.
+    void notify(Scene& scene, EntityId self, const char* callback, EntityId other, double value);
 
     // Cambia un parámetro de la instancia en marcha (el Inspector durante Play).
     void setParameter(EntityId entity, const std::string& name, const ScriptValue& value);
