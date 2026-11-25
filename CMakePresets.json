@@ -15,6 +15,24 @@
         "GE3D_ENABLE_VULKAN": "ON",
         "GE3D_BUILD_VULKAN_EDITOR": "ON"
       }
+    },
+    {
+      "name": "windows-mingw",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_COMPILER": "g++"
+      }
+    },
+    {
+      "name": "windows-mingw-vulkan",
+      "inherits": "windows-mingw",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "GE3D_ENABLE_VULKAN": "ON",
+        "GE3D_BUILD_VULKAN_EDITOR": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -29,6 +47,14 @@
       "configurePreset": "windows-vulkan",
       "configuration": "Debug",
       "nativeToolOptions": ["/p:TrackFileAccess=false"]
+    },
+    {
+      "name": "windows-mingw",
+      "configurePreset": "windows-mingw"
+    },
+    {
+      "name": "windows-mingw-vulkan",
+      "configurePreset": "windows-mingw-vulkan"
     }
   ],
   "testPresets": [
@@ -36,6 +62,13 @@
       "name": "windows-dev",
       "configurePreset": "windows-dev",
       "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-mingw",
+      "configurePreset": "windows-mingw",
       "output": {
         "outputOnFailure": true
       }

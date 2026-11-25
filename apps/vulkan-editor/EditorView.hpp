@@ -1,32 +1,153 @@
 #pragma once
 
+#include "ge3d/History.hpp"
 #include "ge3d/Scene.hpp"
 #include <glm/glm.hpp>
 #include <imgui.h>
 
+#include <cstdint>
+#include <filesystem>
+#include <optional>
+#include <string>
+#include <vector>
+
 class EditorView {
 public:
-    EditorView();
+    // Dónde y a qué escala dibujar la cuadrícula del suelo este fotograma.
+    struct GridView {
+        glm::vec2 offset;   // origen en el mundo (x, z), múltiplo de spacing
+        glm::vec2 focus;    // punto que mira la cámara (x, z): centro del desvanecimiento
+        float spacing;      // metros entre líneas: 1, 10 o 100 según el zoom
+        float fadeRadius;   // metros hasta los que se ve la cuadrícula
+    };
+
+    explicit EditorView(float uiScale = 1.0f);
     void draw(ImTextureID sceneTexture);
     [[nodiscard]] glm::mat4 renderCamera() const;
     [[nodiscard]] const ge3d::Scene& scene() const { return scene_; }
+    [[nodiscard]] bool showGrid() const { return showGrid_; }
+    [[nodiscard]] GridView gridView() const;
+    [[nodiscard]] bool isPlaying() const { return playSnapshot_.has_value(); }
+    [[nodiscard]] bool hasUnsavedChanges() const { return history_.state() != savedState_; }
+    [[nodiscard]] std::string windowTitle() const;
+    // Cierre de la ventana: si hay cambios sin guardar, el editor pregunta antes de aprobarlo.
+    void requestQuit();
+    [[nodiscard]] bool quitApproved() const { return quitApproved_; }
     static glm::mat4 modelMatrix(const ge3d::Transform& transform);
 
 private:
+    enum class Tool { hand, move, rotate, scale };
+    enum class SceneChange { none, newScene, open, reload, quit };
+    enum class PathPopup { none, open, saveAs };
+
+    struct ProjectNode {
+        std::string name;
+        std::filesystem::path path;
+        bool directory{};
+        std::vector<ProjectNode> children;
+    };
+
     [[nodiscard]] glm::mat4 view() const;
     [[nodiscard]] glm::mat4 projection() const;
     void pick(ImVec2 mouse, ImVec2 origin, ImVec2 size);
     void focusSelection();
+    void setViewFromMatrix(const glm::mat4& view);
+
+    // Paneles
+    void drawMenuBar();
+    void drawToolbar();
+    void drawStatusBar();
+    void drawHierarchy();
+    void drawInspector();
+    void drawViewport(ImTextureID sceneTexture);
+    void drawProject();
+    void drawConsole();
+    void drawPathPopup();
+    void drawUnsavedPopup();
+    void drawShortcutsPopup();
+    void handleShortcuts();
+    void buildDefaultLayout(ImGuiID dock);
+
+    // Edición
+    [[nodiscard]] ge3d::History& activeHistory() { return isPlaying() ? playHistory_ : history_; }
+    void execute(ge3d::EditCommand command);
+    void commitModification(std::optional<ge3d::Entity>& before, const char* label);
+    void createPrimitive(ge3d::Primitive primitive);
+    void duplicateSelection();
+    void deleteSelection();
+    void undo();
+    void redo();
+    void validateSelection();
+    [[nodiscard]] bool editInProgress() const { return gizmoEdit_.has_value() || inspectorEdit_.has_value(); }
+
+    // Escena y archivos
+    void requestSceneChange(SceneChange change, std::filesystem::path path = {});
+    void performSceneChange();
+    void newScene();
+    bool saveScene();
+    void loadScene();
+    void refreshProject();
+    void drawProjectNode(const ProjectNode& node, bool root);
+
+    // Modo Play: se juega sobre una copia de la escena que se descarta al detener.
+    void togglePlay();
+    void togglePause();
+    void step();
+
+    void log(std::string message, bool error = false);
+
+    static constexpr std::uint64_t notSaved = UINT64_MAX;
+
+    float scale_ = 1.0f;
+    ImFont* boldFont_ = nullptr;
 
     ge3d::Scene scene_ = ge3d::makeStarterScene();
+    ge3d::History history_;
+    std::uint64_t savedState_ = notSaved;
+    std::filesystem::path scenePath_;
+    std::filesystem::path contentRoot_;
+    ProjectNode project_;
+    bool projectFound_ = false;
+
+    std::optional<ge3d::Scene> playSnapshot_;
+    ge3d::History playHistory_;
+    bool paused_ = false;
+    std::uint64_t playFrames_ = 0;
+
+    SceneChange pendingChange_ = SceneChange::none;
+    std::filesystem::path pendingPath_;
+    bool openUnsavedPopup_ = false;
+    bool quitApproved_ = false;
+    PathPopup pathPopup_ = PathPopup::none;
+    bool openShortcutsPopup_ = false;
+
+    // Estado previo de la entidad al empezar un arrastre del gizmo o del Inspector.
+    std::optional<ge3d::Entity> gizmoEdit_;
+    std::optional<ge3d::Entity> inspectorEdit_;
+    char nameBuffer_[128]{};
+    bool nameEditing_ = false;
+    char pathBuffer_[512]{};
+    char hierarchyFilter_[64]{};
+    char consoleFilter_[64]{};
+
+    bool showHierarchy_ = true;
+    bool showInspector_ = true;
+    bool showProject_ = true;
+    bool showConsole_ = true;
+    bool showInfo_ = true;
+    bool showWarnings_ = true;
+    bool showErrors_ = true;
+    std::size_t consoleRevision_ = 0;
+
     ge3d::EntityId selected_{};
     glm::vec3 pivot_{0.0f, 0.35f, 0.0f};
     float yaw_ = 0.75f;
     float pitch_ = 0.48f;
     float distance_ = 7.0f;
-    int tool_ = 0;
+    Tool tool_ = Tool::move;
     bool localAxes_ = false;
     bool snap_ = false;
+    bool showGrid_ = true;
     bool orbiting_ = false;
     bool panning_ = false;
     bool layoutCreated_ = false;

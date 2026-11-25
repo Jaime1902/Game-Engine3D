@@ -21,7 +21,11 @@ target_include_directories(ge3d_editor_widgets SYSTEM PUBLIC "${imgui_SOURCE_DIR
 target_link_libraries(ge3d_editor_widgets PRIVATE Vulkan::Vulkan glfw)
 target_link_libraries(ge3d_vulkan_editor PRIVATE ge3d::runtime ge3d_editor_widgets Vulkan::Vulkan glfw GPUOpen::VulkanMemoryAllocator)
 target_include_directories(ge3d_vulkan_editor SYSTEM PRIVATE "${glm_SOURCE_DIR}")
-target_sources(ge3d_vulkan_editor PRIVATE vma.cpp EditorView.cpp)
+target_sources(ge3d_vulkan_editor PRIVATE vma.cpp EditorView.cpp EditorLog.cpp)
+# vma.cpp solo compila la implementación de VulkanMemoryAllocator (código externo).
+if(NOT MSVC)
+    set_source_files_properties(vma.cpp PROPERTIES COMPILE_OPTIONS "-w")
+endif()
 
 find_program(GE3D_SLANGC NAMES slangc HINTS "$ENV{VULKAN_SDK}/Bin" REQUIRED)
 set(GE3D_SHADER_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/shaders")
@@ -39,4 +43,8 @@ foreach(stage vertex fragment)
 endforeach()
 add_custom_target(ge3d_vulkan_shaders DEPENDS ${GE3D_SHADER_BINARIES})
 add_dependencies(ge3d_vulkan_editor ge3d_vulkan_shaders)
-target_compile_definitions(ge3d_vulkan_editor PRIVATE GE3D_SHADER_DIR="${GE3D_SHADER_OUTPUT_DIR}")
+target_compile_definitions(ge3d_vulkan_editor PRIVATE
+    GE3D_SHADER_DIR="${GE3D_SHADER_OUTPUT_DIR}"
+    GE3D_DEFAULT_SCENE="${PROJECT_SOURCE_DIR}/projects/pueblo/Content/scenes/main.scene.json"
+    GE3D_CONTENT_DIR="${PROJECT_SOURCE_DIR}/projects/pueblo/Content"
+)

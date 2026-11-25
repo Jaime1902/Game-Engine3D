@@ -1,21 +1,28 @@
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 #include <vk_mem_alloc.h>
+#include "EditorLog.hpp"
 #include "EditorView.hpp"
 #include "ge3d/Primitives.hpp"
 #include <backends/imgui_impl_glfw.h>
 #include <backends/imgui_impl_vulkan.h>
 #include <ImGuizmo.h>
+#include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <map>
 #include <cstddef>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <fstream>
 #include <limits>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -24,6 +31,51 @@ void check(VkResult result, const char* operation) {
     if (result != VK_SUCCESS) {
         throw std::runtime_error(operation);
     }
+}
+
+// --- Capas de validación -------------------------------------------------------------------
+// Activas por defecto en Debug. GE3D_VALIDATION=0 las desactiva y GE3D_VALIDATION=1 las fuerza en Release.
+
+constexpr const char* validationLayer = "VK_LAYER_KHRONOS_validation";
+std::atomic<int> validationErrors{0};
+std::atomic<int> validationWarnings{0};
+
+VKAPI_ATTR VkBool32 VKAPI_CALL onValidationMessage(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
+        VkDebugUtilsMessageTypeFlagsEXT, const VkDebugUtilsMessengerCallbackDataEXT* data, void*) {
+    const bool error = (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) != 0;
+    ++(error ? validationErrors : validationWarnings);
+    // Se muestra en la Consola del editor y también en la terminal.
+    editorLog().add(error ? LogLevel::error : LogLevel::warning,
+                    std::string(error ? "[Vulkan error] " : "[Vulkan aviso] ") +
+                        (data && data->pMessage ? data->pMessage : "(sin mensaje)"));
+    return VK_FALSE;
+}
+
+bool validationRequested() {
+    if (const char* value = std::getenv("GE3D_VALIDATION")) return std::string_view(value) != "0";
+#ifdef NDEBUG
+    return false;
+#else
+    return true;
+#endif
+}
+
+bool hasInstanceLayer(const char* name) {
+    std::uint32_t count = 0;
+    if (vkEnumerateInstanceLayerProperties(&count, nullptr) != VK_SUCCESS) return false;
+    std::vector<VkLayerProperties> layers(count);
+    if (vkEnumerateInstanceLayerProperties(&count, layers.data()) != VK_SUCCESS) return false;
+    return std::any_of(layers.begin(), layers.end(),
+                       [&](const VkLayerProperties& layer) { return std::strcmp(layer.layerName, name) == 0; });
+}
+
+VkDebugUtilsMessengerCreateInfoEXT messengerCreateInfo() {
+    VkDebugUtilsMessengerCreateInfoEXT info{VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
+    info.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+    info.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                       VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+    info.pfnUserCallback = onValidationMessage;
+    return info;
 }
 
 
@@ -117,6 +169,18 @@ struct Vertex {
     glm::vec3 color;
 };
 
+// Debe coincidir con ScenePush en shaders/scene.slang.
+struct ScenePush {
+    glm::mat4 transform{1.0f};
+    glm::vec4 fade{0.0f};
+    glm::vec4 grid{0.0f};
+};
+static_assert(sizeof(ScenePush) == 96, "ScenePush debe ocupar 96 bytes (limite garantizado: 128)");
+constexpr VkShaderStageFlags pushStages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+
+// Semiancho de la cuadrícula base en líneas. Se recoloca y se escala cada fotograma según la cámara.
+constexpr int gridHalfLines = 50;
+
 struct MeshRange {
     std::uint32_t firstIndex{};
     std::uint32_t count{};
@@ -159,13 +223,13 @@ SceneGeometry makeGeometry() {
         geometry.vertices.push_back({a, color});
         geometry.vertices.push_back({b, color});
     };
-    for (int i = -12; i <= 12; ++i) {
+    // Los ejes rojo/azul los colorea el shader según la posición en el mundo.
+    constexpr float extent = static_cast<float>(gridHalfLines);
+    const glm::vec3 minor{0.32f, 0.34f, 0.37f};
+    for (int i = -gridHalfLines; i <= gridHalfLines; ++i) {
         const float coordinate = static_cast<float>(i);
-        const glm::vec3 minor{0.18f, 0.23f, 0.28f};
-        line({coordinate, 0.004f, -12}, {coordinate, 0.004f, 12},
-             i == 0 ? glm::vec3{0.23f, 0.48f, 0.70f} : minor);
-        line({-12, 0.004f, coordinate}, {12, 0.004f, coordinate},
-             i == 0 ? glm::vec3{0.65f, 0.27f, 0.29f} : minor);
+        line({coordinate, 0, -extent}, {coordinate, 0, extent}, minor);
+        line({-extent, 0, coordinate}, {extent, 0, coordinate}, minor);
     }
     geometry.gridCount = static_cast<std::uint32_t>(geometry.vertices.size()) - geometry.gridFirst;
     return geometry;
@@ -195,9 +259,9 @@ VkPipeline createScenePipeline(VkDevice device, VkFormat colorFormat, VkPipeline
     try {
         fragment = createShaderModule(device, "scene.fragment.spv");
         VkPushConstantRange push{};
-        push.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        push.stageFlags = pushStages;
         push.offset = 0;
-        push.size = sizeof(float) * 16;
+        push.size = sizeof(ScenePush);
         VkPipelineLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
         layoutInfo.pushConstantRangeCount = 1;
         layoutInfo.pPushConstantRanges = &push;
@@ -335,6 +399,8 @@ void run() {
     }
 
     VkInstance instance = VK_NULL_HANDLE;
+    VkDebugUtilsMessengerEXT messenger = VK_NULL_HANDLE;
+    bool validation = validationRequested();
     VkSurfaceKHR surface = VK_NULL_HANDLE;
     VkDevice device = VK_NULL_HANDLE;
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
@@ -394,9 +460,18 @@ void run() {
         if (uiPlatform) ImGui_ImplGlfw_Shutdown();
         if (uiContext) ImGui::DestroyContext();
         if (surface) vkDestroySurfaceKHR(instance, surface, nullptr);
+        if (messenger) {
+            const auto destroyMessenger = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(
+                vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT"));
+            if (destroyMessenger) destroyMessenger(instance, messenger, nullptr);
+        }
         if (instance) vkDestroyInstance(instance, nullptr);
         glfwDestroyWindow(window);
         glfwTerminate();
+        if (validation) {
+            std::cout << "Validacion Vulkan: " << validationErrors << " errores, "
+                      << validationWarnings << " avisos\n";
+        }
     };
     try {
         std::uint32_t loaderVersion = VK_API_VERSION_1_0;
@@ -408,14 +483,35 @@ void run() {
         std::uint32_t extensionCount = 0;
         const char** extensions = glfwGetRequiredInstanceExtensions(&extensionCount);
         if (!extensions) throw std::runtime_error("GLFW could not load Vulkan surface extensions");
+        if (validation && !hasInstanceLayer(validationLayer)) {
+            std::cerr << "Capa de validacion no instalada (" << validationLayer << "); se continua sin ella\n";
+            validation = false;
+        }
+        std::vector<const char*> instanceExtensions(extensions, extensions + extensionCount);
+        if (validation) instanceExtensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+        const auto messengerInfo = messengerCreateInfo();
+
         VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
         app.pApplicationName = "Game-Engine3D";
         app.apiVersion = VK_API_VERSION_1_3;
         VkInstanceCreateInfo create{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
         create.pApplicationInfo = &app;
-        create.enabledExtensionCount = extensionCount;
-        create.ppEnabledExtensionNames = extensions;
+        create.enabledExtensionCount = static_cast<std::uint32_t>(instanceExtensions.size());
+        create.ppEnabledExtensionNames = instanceExtensions.data();
+        if (validation) {
+            // Encadenado también aquí para validar la creación y destrucción de la instancia.
+            create.pNext = &messengerInfo;
+            create.enabledLayerCount = 1;
+            create.ppEnabledLayerNames = &validationLayer;
+        }
         check(vkCreateInstance(&create, nullptr, &instance), "Create Vulkan instance");
+        if (validation) {
+            const auto createMessenger = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(
+                vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT"));
+            if (!createMessenger) throw std::runtime_error("vkCreateDebugUtilsMessengerEXT no disponible");
+            check(createMessenger(instance, &messengerInfo, nullptr, &messenger), "Create debug messenger");
+            editorLog().add(LogLevel::info, "Validacion Vulkan activa");
+        }
         check(glfwCreateWindowSurface(instance, window, nullptr, &surface), "Create GLFW Vulkan surface");
 
         std::uint32_t gpuCount = 0;
@@ -493,7 +589,10 @@ void run() {
         uiContext = true;
         ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_DockingEnable;
         ImGui::GetIO().IniFilename = nullptr;
-        EditorView editor;
+        float contentScaleX = 1.0f;
+        float contentScaleY = 1.0f;
+        glfwGetWindowContentScale(window, &contentScaleX, &contentScaleY);
+        EditorView editor(contentScaleX);
         uiPlatform = ImGui_ImplGlfw_InitForVulkan(window, true);
         if (!uiPlatform) throw std::runtime_error("Initialize GLFW editor backend");
         VkSamplerCreateInfo sampler{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
@@ -515,9 +614,11 @@ void run() {
                      candidate.format == VK_FORMAT_B8G8R8A8_UNORM || candidate.format == VK_FORMAT_R8G8B8A8_UNORM) &&
                     supportsFormat(physical, candidate.format, VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT);
             };
+            // UNORM: la escena pixel art y los colores de la interfaz ya están en espacio sRGB. Un swapchain
+            // *_SRGB volvería a aplicar la gamma y aclararía todo (colores lavados y paleta alterada).
             auto format = std::find_if(support.formats.begin(), support.formats.end(), [&](const auto& candidate) {
                 return colorCompatible(candidate) &&
-                       (candidate.format == VK_FORMAT_B8G8R8A8_SRGB || candidate.format == VK_FORMAT_R8G8B8A8_SRGB);
+                       (candidate.format == VK_FORMAT_B8G8R8A8_UNORM || candidate.format == VK_FORMAT_R8G8B8A8_UNORM);
             });
             if (format == support.formats.end()) {
                 format = std::find_if(support.formats.begin(), support.formats.end(), colorCompatible);
@@ -676,10 +777,16 @@ void run() {
         int lastWidth = 0;
         int lastHeight = 0;
         bool recreate = true;
+        std::string windowTitle;
         std::cout << "Vulkan pixel art preview: 320 x 180\n";
-        while (!glfwWindowShouldClose(window)) {
+        while (!editor.quitApproved()) {
             glfwPollEvents();
-            if (glfwWindowShouldClose(window)) break;
+            // Cerrar la ventana pasa por el editor: si hay cambios sin guardar pregunta antes.
+            if (glfwWindowShouldClose(window)) {
+                glfwSetWindowShouldClose(window, GLFW_FALSE);
+                editor.requestQuit();
+                if (editor.quitApproved()) break;
+            }
 
             int width = 0;
             int height = 0;
@@ -714,6 +821,10 @@ void run() {
             ImGuizmo::BeginFrame();
             editor.draw(reinterpret_cast<ImTextureID>(sceneTextures[frame]));
             ImGui::Render();
+            if (auto title = editor.windowTitle(); title != windowTitle) {
+                windowTitle = std::move(title);
+                glfwSetWindowTitle(window, windowTitle.c_str());
+            }
 
             const auto command = commands[frame];
             const auto& color = sceneColors[frame];
@@ -737,7 +848,7 @@ void run() {
             colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
             colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
             colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-            colorAttachment.clearValue.color = {{0.012f, 0.022f, 0.04f, 1.0f}};
+            colorAttachment.clearValue.color = {{0.19f, 0.21f, 0.24f, 1.0f}};
             VkRenderingAttachmentInfo depthAttachment{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
             depthAttachment.imageView = depth.view;
             depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
@@ -764,16 +875,28 @@ void run() {
             vkCmdBindIndexBuffer(command, indices.handle, 0, VK_INDEX_TYPE_UINT32);
             vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, cubePipeline);
             for (const auto& entity : editor.scene().entities()) {
-                const auto transform = camera * EditorView::modelMatrix(entity.transform);
+                ScenePush push;
+                push.transform = camera * EditorView::modelMatrix(entity.transform);
                 const auto mesh = entity.primitive == ge3d::Primitive::box ? geometry.box : geometry.ramp;
-                vkCmdPushConstants(command, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0,
-                    sizeof(transform), glm::value_ptr(transform));
+                vkCmdPushConstants(command, pipelineLayout, pushStages, 0, sizeof(push), &push);
                 vkCmdDrawIndexed(command, mesh.count, 1, mesh.firstIndex, 0, 0);
             }
-            vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, gridPipeline);
-            vkCmdPushConstants(command, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0,
-                sizeof(camera), glm::value_ptr(camera));
-            vkCmdDraw(command, geometry.gridCount, 1, geometry.gridFirst, 0);
+            if (editor.showGrid()) {
+                // Cuadrícula "infinita": se recoloca bajo el punto que mira la cámara, ajustada a su
+                // separación, y se desvanece con tramado antes de llegar al borde de la malla base.
+                const auto grid = editor.gridView();
+                const float limit = static_cast<float>(gridHalfLines) * 0.95f;
+                ScenePush push;
+                push.transform = camera *
+                    glm::translate(glm::mat4{1.0f}, {grid.offset.x, 0.01f, grid.offset.y}) *
+                    glm::scale(glm::mat4{1.0f}, {grid.spacing, 1.0f, grid.spacing});
+                push.fade = {(grid.focus - grid.offset) / grid.spacing,
+                             std::min(grid.fadeRadius / grid.spacing, limit), 0.0f};
+                push.grid = {grid.offset.x, grid.offset.y, grid.spacing, 1.0f};
+                vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, gridPipeline);
+                vkCmdPushConstants(command, pipelineLayout, pushStages, 0, sizeof(push), &push);
+                vkCmdDraw(command, geometry.gridCount, 1, geometry.gridFirst, 0);
+            }
             vkCmdEndRendering(command);
 
             transition(command, color.image, VK_IMAGE_ASPECT_COLOR_BIT,

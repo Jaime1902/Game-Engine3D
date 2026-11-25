@@ -11,7 +11,14 @@ target_compile_features(ge3d_options INTERFACE cxx_std_20)
 if(MSVC)
     target_compile_options(ge3d_options INTERFACE /W4 /permissive- /utf-8 /EHsc)
 else()
-    target_compile_options(ge3d_options INTERFACE -Wall -Wextra -Wpedantic)
+    # -Wno-missing-field-initializers: el patrón de Vulkan `VkFoo info{VK_STRUCTURE_TYPE_FOO};`
+    # deja el resto de campos en cero a propósito; sin esto genera cientos de avisos.
+    target_compile_options(ge3d_options INTERFACE -Wall -Wextra -Wpedantic -Wno-missing-field-initializers)
+endif()
+if(MINGW)
+    # Enlaza libstdc++/libgcc dentro del .exe: evita cargar por error la DLL de otro MinGW del PATH
+    # (p. ej. el de Git), que provoca el error 0xc0000139 al arrancar.
+    target_link_options(ge3d_options INTERFACE -static)
 endif()
 
 add_subdirectory(engine)
