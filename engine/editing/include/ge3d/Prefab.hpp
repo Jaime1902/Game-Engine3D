@@ -17,7 +17,7 @@ namespace ge3d {
 // copian al crear la instancia y después son de ella (solo se sincroniza su configuración).
 
 // Componentes que se comparan y sincronizan, por nombre.
-inline constexpr const char* prefabComponents[] = {"name", "active", "transform", "shape", "terrain", "heightmap",
+inline constexpr const char* prefabComponents[] = {"name", "active", "transform", "shape", "model", "terrain", "heightmap",
                                                    "script", "body", "audio", "player"};
 
 [[nodiscard]] const Entity* prefabRoot(const Scene& prefab);

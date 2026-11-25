@@ -132,7 +132,7 @@ ImFont* loadFonts(float scale, ImFont*& bold, ImFont*& code) {
 }
 
 // --- Iconos dibujados con primitivas (la fuente no trae iconos) -------------------------------
-enum class Icon { hand, move, rotate, scale, paint, build, terrain, play, pause, step, cube, ramp, folder, file, scene, empty, script, sound };
+enum class Icon { hand, move, rotate, scale, paint, build, terrain, play, pause, step, cube, ramp, folder, file, scene, empty, script, sound, model };
 
 void drawIcon(ImDrawList* draw, Icon icon, ImVec2 center, float r, ImU32 color) {
     const float t = std::max(1.0f, r * 0.17f);
@@ -234,6 +234,13 @@ void drawIcon(ImDrawList* draw, Icon icon, ImVec2 center, float r, ImU32 color) 
         draw->PathStroke(color, 0, t);
         draw->PathArcTo(p(0.05f, 0.0f), r * 0.8f, -0.9f, 0.9f, 12);
         draw->PathStroke(color, 0, t);
+        break;
+    }
+    case Icon::model: {
+        // Figura: cabeza y cuerpo (un modelo 3D importado).
+        draw->AddCircleFilled(p(0.0f, -0.55f), r * 0.3f, color);
+        const ImVec2 body[] = {p(-0.55f, 0.85f), p(-0.3f, -0.15f), p(0.3f, -0.15f), p(0.55f, 0.85f)};
+        draw->AddConvexPolyFilled(body, 4, color);
         break;
     }
     case Icon::file: {
@@ -363,6 +370,7 @@ bool contains(const std::string& text, const char* filter) {
 Icon entityIcon(const ge3d::Entity& entity) {
     if (entity.terrain || entity.heightmap) return Icon::terrain;
     if (entity.shape) return entity.shape->primitive == ge3d::Primitive::box ? Icon::cube : Icon::ramp;
+    if (entity.model) return Icon::model;
     return Icon::empty;
 }
 
@@ -386,8 +394,16 @@ std::string sceneName(const std::filesystem::path& path) {
 EditorView::EditorView(float uiScale, std::filesystem::path initialScene) : scale_(std::clamp(uiScale, 0.75f, 3.0f)) {
     applyTheme(scale_);
     loadFonts(scale_, boldFont_, codeFont_);
+    for (std::size_t k = 0; k < uiFonts_.size(); ++k) {
+        ImFontConfig config;
+        config.SizePixels = 13.0f * static_cast<float>(k + 1);
+        config.OversampleH = config.OversampleV = 1;
+        config.PixelSnapH = true;
+        uiFonts_[k] = ImGui::GetIO().Fonts->AddFontDefault(&config);
+    }
 
     contentRoot_ = ge3d::pathFromUtf8(GE3D_CONTENT_DIR);
+    models_.setRoot(contentRoot_);
     projectFolder_ = contentRoot_;
     loadSettings();
     // Escena inicial: la indicada al abrir el editor, si no la última que se usó, si no la de ejemplo.
@@ -1335,6 +1351,9 @@ std::optional<EditorView::Hit> EditorView::raycast(ImVec2 mouse, ImVec2 origin, 
         if (entity.heightmap) {
             if (auto hit = raycastHeightmap(entity, ray); hit && (!best || hit->distance < best->distance)) best = hit;
         }
+        if (entity.model) {
+            if (auto hit = raycastModel(entity, ray); hit && (!best || hit->distance < best->distance)) best = hit;
+        }
         if (!entity.shape) continue;
         const auto model = worldMatrix(entity);
         const auto& mesh = meshOf(entity.shape->primitive);
@@ -1354,6 +1373,64 @@ std::optional<EditorView::Hit> EditorView::raycast(ImVec2 mouse, ImVec2 origin, 
         }
     }
     return best;
+}
+
+std::optional<EditorView::Hit> EditorView::raycastModel(const ge3d::Entity& entity, const Ray& ray) const {
+    if (!ge3d::activeInHierarchy(scene_, entity) || entity.id == hiddenEntity()) return std::nullopt;
+    const auto data = models_.cached(entity.model->path);
+    if (!data || data->indices.empty()) return std::nullopt;
+    // El rayo se pasa al espacio del modelo: primero la caja que lo envuelve, luego sus triángulos.
+    const glm::mat4 world = worldMatrix(entity);
+    const glm::mat4 inverse = glm::inverse(world);
+    const glm::vec3 start = glm::vec3(inverse * glm::vec4(ray.start, 1.0f));
+    const glm::vec3 direction = glm::vec3(inverse * glm::vec4(ray.direction, 0.0f));
+    const glm::vec3 low{data->boundsMin.x, data->boundsMin.y, data->boundsMin.z};
+    const glm::vec3 high{data->boundsMax.x, data->boundsMax.y, data->boundsMax.z};
+    float enter = 0.0f, leave = 1e30f;
+    for (int axis = 0; axis < 3; ++axis) {
+        if (std::abs(direction[axis]) < 1e-8f) {
+            if (start[axis] < low[axis] || start[axis] > high[axis]) return std::nullopt;
+            continue;
+        }
+        float a = (low[axis] - start[axis]) / direction[axis];
+        float b = (high[axis] - start[axis]) / direction[axis];
+        if (a > b) std::swap(a, b);
+        enter = std::max(enter, a);
+        leave = std::min(leave, b);
+        if (enter > leave) return std::nullopt;
+    }
+    float bestT = -1.0f;
+    glm::vec3 bestNormal{0, 1, 0};
+    const auto position = [&](std::uint32_t index) {
+        const auto& v = data->vertices[index].position;
+        return glm::vec3{v[0], v[1], v[2]};
+    };
+    for (std::size_t i = 0; i + 2 < data->indices.size(); i += 3) {
+        const auto a = position(data->indices[i]);
+        const auto b = position(data->indices[i + 1]);
+        const auto c = position(data->indices[i + 2]);
+        const float t = hitTriangle(start, direction, a, b, c);
+        if (t >= 0 && (bestT < 0 || t < bestT)) {
+            bestT = t;
+            bestNormal = glm::cross(b - a, c - a);
+        }
+    }
+    if (bestT < 0) return std::nullopt;
+    // t vale igual en los dos espacios: la dirección del rayo se transformó sin normalizar.
+    const glm::vec3 point = ray.start + ray.direction * bestT;
+    glm::vec3 normal = glm::normalize(glm::transpose(glm::mat3(inverse)) * bestNormal);
+    if (glm::dot(normal, ray.direction) > 0) normal = -normal;
+    return Hit{entity.id, 0, bestT, point, normal};
+}
+
+std::optional<glm::mat4> EditorView::modelBoundsMatrix(const ge3d::Entity& entity) const {
+    if (!entity.model) return std::nullopt;
+    const auto data = models_.cached(entity.model->path);
+    if (!data) return std::nullopt;
+    const glm::vec3 low{data->boundsMin.x, data->boundsMin.y, data->boundsMin.z};
+    const glm::vec3 high{data->boundsMax.x, data->boundsMax.y, data->boundsMax.z};
+    return worldMatrix(entity) * glm::translate(glm::mat4{1.0f}, (low + high) * 0.5f) *
+           glm::scale(glm::mat4{1.0f}, glm::max(high - low, glm::vec3{0.01f}));
 }
 
 void EditorView::pick(ImVec2 mouse, ImVec2 origin, ImVec2 size) {
@@ -2037,7 +2114,7 @@ void EditorView::drawMenuBar() {
         if (ImGui::MenuItem("Terreno")) createHeightmap();
         if (ImGui::MenuItem("Terreno de voxeles")) createTerrain();
         ImGui::Separator();
-        if (ImGui::MenuItem("Jugador (primera persona)")) createSpecial(Special::player);
+        if (ImGui::MenuItem("Jugador")) createSpecial(Special::player);
         if (ImGui::MenuItem("Zona (trigger)")) createSpecial(Special::zone);
         if (ImGui::MenuItem("Fuente de sonido")) createSpecial(Special::sound);
         ImGui::Separator();
@@ -2491,6 +2568,8 @@ void EditorView::drawHierarchy() {
     if (!droppedAsset.empty()) {
         // Un prefab soltado en la Jerarquía se instancia (como hijo si cae sobre un objeto).
         if (droppedAsset.ends_with(".prefab.json")) instantiatePrefab(droppedAsset, std::nullopt, droppedOn);
+        // Un modelo en la Jerarquía crea un objeto (hijo del objeto sobre el que cae).
+        else if (ge3d::isValidModelPath(droppedAsset)) createModelEntity(droppedAsset, std::nullopt, droppedOn);
         else if (droppedOn) applyAsset(droppedAsset, droppedOn, std::nullopt);
     }
     if (action == Action::duplicate) duplicateSelection();
@@ -2550,6 +2629,10 @@ void EditorView::applyComponentAction(ge3d::Entity& entity, const ge3d::Entity& 
         else if (entity.audio) entity.audio = ge3d::AudioSourceComponent{entity.audio->clip};
         break;
     case 8: entity.player = paste ? source.player : std::optional<ge3d::PlayerComponent>(ge3d::PlayerComponent{}); break;
+    case 9:
+        if (paste && source.model) entity.model = source.model;
+        else if (entity.model) entity.model = ge3d::ModelComponent{entity.model->path};
+        break;
     default: return;
     }
     commitModification(before, paste ? "Pegar valores" : "Restablecer componente");
@@ -2604,12 +2687,12 @@ void EditorView::drawInspector() {
 
         // Cada componente tiene un menú (boton ... o clic derecho en su cabecera): Restablecer, Copiar valores,
         // Pegar valores y Quitar.
-        enum class Removal { none, transform, shape, terrain, heightmap, script, body, audio, player };
+        enum class Removal { none, transform, shape, terrain, heightmap, script, body, audio, player, model };
         Removal removal = Removal::none;
         Removal menuKind = Removal::none;
         int menuAction = 0;   // 1 restablecer, 2 copiar, 3 pegar
         std::string revertComponent;
-        static constexpr const char* componentNames[] = {"", "transform", "shape", "terrain", "heightmap", "script", "body", "audio", "player"};
+        static constexpr const char* componentNames[] = {"", "transform", "shape", "terrain", "heightmap", "script", "body", "audio", "player", "model"};
         const auto removeMenu = [&](const char* id, Removal kind) {
             // En una instancia de prefab, una barra azul marca los componentes cambiados en esta copia.
             const char* component = componentNames[static_cast<int>(kind)];
@@ -2719,6 +2802,13 @@ void EditorView::drawInspector() {
             }
         }
 
+        if (entity->model) {
+            const bool open = componentHeader("Modelo", boldFont_);
+            removeMenu("modelo_menu", Removal::model);
+            if (open) drawModelComponent(*entity, frameStart);
+            ImGui::Spacing();
+        }
+
         // Componente Terreno (malla): capas, generador y tamaño (los pinceles están en la herramienta T).
         if (entity->heightmap) {
             const bool open = componentHeader("Terreno", boldFont_);
@@ -2777,6 +2867,7 @@ void EditorView::drawInspector() {
             if (removal == Removal::body) entity->body.reset();
             if (removal == Removal::audio) entity->audio.reset();
             if (removal == Removal::player) entity->player.reset();
+            if (removal == Removal::model) entity->model.reset();
             commitModification(before, "Quitar componente");
         }
 
@@ -2805,6 +2896,9 @@ void EditorView::drawInspector() {
                 const std::vector<Option> options = {
                     {"Forma: caja", !entity->shape, [&] { entity->shape = ge3d::makeShape(ge3d::Primitive::box, paintMaterial_); }},
                     {"Forma: rampa", !entity->shape, [&] { entity->shape = ge3d::makeShape(ge3d::Primitive::ramp, paintMaterial_); }},
+                    {"Modelo", !entity->model, [&] {
+                         entity->model = ge3d::ModelComponent{modelList_.empty() ? std::string() : modelList_.front()};
+                     }},
                     {"Terreno", !entity->heightmap, [&] { entity->heightmap = ge3d::makeHeightmap(newHeightmap_); }},
                     {"Terreno de voxeles", !entity->terrain, [&] { entity->terrain = ge3d::makeTerrain(newTerrain_); }},
                     {"Cuerpo fisico", !entity->body, [&] { entity->body = ge3d::BodyComponent{}; }},
@@ -2844,6 +2938,16 @@ void EditorView::drawInspector() {
             if (ImGui::MenuItem("Forma: rampa", nullptr, false, !entity->shape)) {
                 entity->shape = ge3d::makeShape(ge3d::Primitive::ramp, paintMaterial_);
                 added = true;
+            }
+            if (ImGui::BeginMenu("Modelo", !entity->model)) {
+                for (const auto& path : modelList_) {
+                    if (ImGui::MenuItem(path.c_str())) {
+                        entity->model = ge3d::ModelComponent{path};
+                        added = true;
+                    }
+                }
+                if (modelList_.empty()) ImGui::TextDisabled("No hay glTF en Content/models");
+                ImGui::EndMenu();
             }
             if (ImGui::MenuItem("Terreno", nullptr, false, !entity->heightmap)) {
                 entity->heightmap = ge3d::makeHeightmap(newHeightmap_);
@@ -2936,9 +3040,11 @@ void EditorView::drawSelectionOutline(ImDrawList* draw, ImVec2 origin, ImVec2 si
     // Contorno naranja como en Unity: más intenso en el objeto activo.
     for (const auto id : selection_) {
         const auto* entity = scene_.find(id);
-        if (!entity || !entity->shape) continue;
+        if (!entity) continue;
         const ImU32 color = id == selected_ ? IM_COL32(255, 150, 40, 255) : IM_COL32(255, 180, 90, 190);
-        drawPieceOutline(draw, entity->shape->primitive, worldMatrix(*entity), origin, size, color, IM_COL32(0, 0, 0, 0));
+        if (entity->shape) drawPieceOutline(draw, entity->shape->primitive, worldMatrix(*entity), origin, size, color, IM_COL32(0, 0, 0, 0));
+        // Modelo: la caja que lo envuelve.
+        else if (const auto bounds = modelBoundsMatrix(*entity)) drawPieceOutline(draw, ge3d::Primitive::box, *bounds, origin, size, color, 0);
     }
 }
 
@@ -3119,11 +3225,11 @@ void EditorView::drawViewport(ImTextureID sceneTexture) {
             if (isPlaying()) draw->AddRect(origin, end, ImGui::GetColorU32(accentHover), 0, 0, 2 * scale_);
 
             const bool viewHovered = ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(origin, end);
-            if (firstPerson_ && !mouseCaptured_ && viewHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            if (firstPerson_ && !mouseCaptured_ && !scriptCursor_ && viewHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                 mouseCaptured_ = true;
                 ImGui::SetWindowFocus();
             }
-            // En primera persona el ratón es del jugador: nada de órbita, gizmos ni selección en la vista.
+            // Con la cámara del jugador el ratón es suyo: nada de órbita, gizmos ni selección en la vista.
             const bool hovered = viewHovered && !firstPerson_;
             const bool altOrbit = io.KeyAlt && ImGui::IsMouseDown(ImGuiMouseButton_Left);
             // Como en Unity: clic derecho mira y vuela con WASD/QE (rueda: velocidad); Alt + clic izquierdo orbita.
@@ -3256,6 +3362,10 @@ void EditorView::drawViewport(ImTextureID sceneTexture) {
             if (tool_ == Tool::terrain) handleTerrainTool(draw, origin, size, canUseMouse);
             drawSelectionOutline(draw, origin, size);
             drawPlayOverlay(draw, origin, size);
+            uiOrigin_ = origin;
+            uiSize_ = size;
+            uiHovered_ = viewHovered;
+            if (isPlaying()) drawScriptUi(draw, origin, size);
             draw->PopClipRect();
 
             draw->ChannelsSetCurrent(0);
@@ -3333,6 +3443,18 @@ void EditorView::drawViewport(ImTextureID sceneTexture) {
                                 }
                             }
                             instantiatePrefab(asset, point, 0);
+                        } else if (ge3d::isValidModelPath(asset) && (!hit || !io.KeyAlt)) {
+                            // Un modelo crea un objeto nuevo donde cae (Alt: lo asigna al objeto de debajo).
+                            std::optional<glm::vec3> point;
+                            if (hit) point = hit->point;
+                            else {
+                                const auto ray = mouseRay(io.MousePos, origin, size);
+                                if (std::abs(ray.direction.y) > 1e-4f) {
+                                    const float t = -ray.start.y / ray.direction.y;
+                                    if (t > 0) point = ray.start + ray.direction * t;
+                                }
+                            }
+                            createModelEntity(asset, point, 0);
                         } else if (asset.ends_with(".scene.json")) {
                             requestSceneChange(SceneChange::open, contentRoot_ / ge3d::pathFromUtf8(asset));
                         } else if (hit) {
@@ -3412,6 +3534,10 @@ void EditorView::applyAsset(const std::string& asset, ge3d::EntityId id, std::op
     } else if (asset.ends_with(".luau") && ge3d::isValidScriptPath(asset)) {
         if (!entity->script || entity->script->path != asset) entity->script = ge3d::ScriptComponent{asset, true, {}};
         label = "Asignar script";
+    } else if (ge3d::isValidModelPath(asset)) {
+        if (entity->model) entity->model->path = asset;
+        else entity->model = ge3d::ModelComponent{asset};
+        label = "Asignar modelo";
     } else if (asset.ends_with(".wav") && ge3d::isValidSoundPath(asset)) {
         if (entity->audio) entity->audio->clip = asset;
         else entity->audio = ge3d::AudioSourceComponent{asset};
@@ -3488,11 +3614,13 @@ void EditorView::drawProject() {
         const auto name = ge3d::pathToUtf8(path.filename());
         item.icon = directory ? Icon::folder : name.ends_with(".prefab.json") ? Icon::cube : name.ends_with(".scene.json") ? Icon::scene
                   : name.ends_with(".luau") ? Icon::script
-                  : name.ends_with(".wav") ? Icon::sound : Icon::file;
+                  : name.ends_with(".wav") ? Icon::sound
+                  : (name.ends_with(".gltf") || name.ends_with(".glb")) ? Icon::model : Icon::file;
         item.color = ImGui::GetColorU32(directory ? ImVec4{0.85f, 0.72f, 0.38f, 1} : item.icon == Icon::cube ? ImVec4{0.50f, 0.74f, 1.0f, 1}
                                        : item.icon == Icon::scene ? accentHover
                                        : item.icon == Icon::script ? ImVec4{0.55f, 0.85f, 0.55f, 1}
-                                       : item.icon == Icon::sound ? ImVec4{0.95f, 0.65f, 0.40f, 1} : gray(0.7f));
+                                       : item.icon == Icon::sound ? ImVec4{0.95f, 0.65f, 0.40f, 1}
+                                       : item.icon == Icon::model ? ImVec4{0.80f, 0.62f, 0.95f, 1} : gray(0.7f));
     };
     const bool searching = projectFilter_[0] != '\0';
     if (projectMaterials_ || searching) {

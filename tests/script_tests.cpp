@@ -250,6 +250,65 @@ void testSpawnAndHierarchy() {
     h.host.stop(scene);
 }
 
+// Interfaz de los scripts: órdenes inmediatas, botones con el ratón, texto, colores y cursor.
+void testUi() {
+    expect(ge3d::uiTextWidth("Hola") == 28.0f && ge3d::uiTextWidth("año\nmás largo", 2) == 9 * 14.0f, "ancho del texto (UTF-8)");
+    expect(ge3d::uiWrap("uno dos tres cuatro", 60.0f) == "uno dos\ntres\ncuatro", "partir por palabras");
+    expect(ge3d::uiWrap("abcdefghijkl", 35.0f) == "abcde\nfghij\nkl", "una palabra larga se corta");
+
+    Harness h;
+    h.sources["scripts/hud.luau"] = R"(
+        local Hud = {}
+        function Hud.onStart(self) self.clics = 0 end
+        function Hud.onUpdate(self, dt)
+            ui.panel(4, 4, 80, 30)
+            ui.text("Vida", ui.width() / 2, 6, "#ffd66e", 1, "center")
+            ui.bar(8, 20, 70, 6, 0.25, "#f00")
+            if ui.button("Ok", 10, 40, 40, 14) then
+                self.clics += 1
+                ui.cursor(self.clics == 1)
+                log("clic " .. self.clics)
+            end
+        end
+        function Hud.onInteract(self) ui.text("x", 0, 0, "rojo") end
+        return Hud
+    )";
+    h.sources["scripts/menu.luau"] = R"(
+        local Menu = {}
+        function Menu.onUpdate(self, dt) ui.rect(0, 0, 10, 10, "#00000080") end
+        return Menu
+    )";
+    ge3d::Scene scene;
+    const auto hud = addScripted(scene, "Hud", "scripts/hud.luau");
+    addScripted(scene, "Menu", "scripts/menu.luau");
+    h.host.start(scene);
+    ge3d::ScriptInput input;
+    input.uiWidth = 200;
+    input.uiHeight = 120;
+    h.host.update(scene, 0.016f, input);
+    auto ui = h.host.uiCommands();
+    expect(ui.size() == 5, "cada script dibuja su interfaz en onUpdate");
+    expect(ui.size() == 5 && ui[1].kind == ge3d::UiCommand::Kind::text && ui[1].x == 100.0f - 14.0f && ui[1].color == 0xFF6ED6FFu,
+           "texto centrado con color #rrggbb");
+    expect(ui.size() == 5 && ui[2].kind == ge3d::UiCommand::Kind::bar && ui[2].value == 0.25f && ui[2].color == 0xFF0000FFu, "barra");
+    expect(ui.size() == 5 && ui[3].state == 0 && ui[4].color == 0x80000000u, "boton sin raton y color con alfa");
+    // El fotograma siguiente se rehace (no se acumula) y el clic dentro del botón se detecta una vez.
+    input.mouseX = 20;
+    input.mouseY = 45;
+    input.mouseDown = input.mousePressed = true;
+    h.host.update(scene, 0.016f, input);
+    ui = h.host.uiCommands();
+    expect(ui.size() == 5 && ui[3].state == 2, "boton pulsado");
+    expect(h.logged("clic 1") && h.host.wantsCursor(), "ui.button devuelve true al pulsar y ui.cursor suelta el raton");
+    input.mousePressed = false;
+    h.host.update(scene, 0.016f, input);
+    expect(!h.logged("clic 2") && h.host.uiCommands().size() == 5, "mantener pulsado no repite el clic");
+    (void)h.host.interact(scene, hud);
+    expect(h.failed("color no valido"), "un color mal escrito es un error claro");
+    h.host.stop(scene);
+    expect(h.host.uiCommands().empty() && !h.host.wantsCursor(), "Stop borra la interfaz");
+}
+
 void testSerialization() {
     ge3d::Scene scene;
     addScripted(scene, "Puerta", "scripts/puerta.luau", {{"velocidad", 45.0}, {"abierta", true}, {"nombre", std::string("norte")}});
@@ -273,6 +332,7 @@ int main() {
     testReload();
     testSpawnAndHierarchy();
     testSerialization();
+    testUi();
     if (failures > 0) {
         std::cerr << failures << " comprobaciones fallidas\n";
         return 1;

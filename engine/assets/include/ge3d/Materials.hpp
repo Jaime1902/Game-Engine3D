@@ -56,6 +56,8 @@ struct Image {
 
 // Lanza std::runtime_error si no se puede leer.
 [[nodiscard]] Image loadPng(const std::filesystem::path& path);
+// PNG o JPEG en memoria (texturas de modelos glTF). Lanza std::runtime_error si no se puede decodificar.
+[[nodiscard]] Image decodeImage(const std::uint8_t* data, std::size_t size);
 void savePng(const std::filesystem::path& path, const Image& image);
 
 }

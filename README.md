@@ -4,7 +4,7 @@ Motor de escritorio para construir, programar y jugar escenas 3D pixel art desde
 
 ## Estado del repositorio
 
-El runtime C++ organiza cada objeto en componentes (Transformación, Forma, Terreno y Terreno de vóxeles), genera y malla terrenos de malla y de vóxeles, carga materiales con texturas PNG, guarda y abre escenas en JSON y lleva un historial de deshacer y rehacer. El editor Vulkan tiene la distribución clásica de un editor de escenas: Jerarquía, Escena, Inspector, Proyecto y Consola, con barra de herramientas y modo Play. El jugador de consola permite comprobar el arranque del runtime. Los objetos se programan con scripts Luau desde la pestaña Código y se prueban en Play, con física (Jolt), sonido 3D (miniaudio) y un jugador en primera persona. El avance por etapas está en [docs/roadmap.md](docs/roadmap.md).
+El runtime C++ organiza cada objeto en componentes (Transformación, Forma, Terreno y Terreno de vóxeles), genera y malla terrenos de malla y de vóxeles, carga materiales con texturas PNG, guarda y abre escenas en JSON y lleva un historial de deshacer y rehacer. El editor Vulkan tiene la distribución clásica de un editor de escenas: Jerarquía, Escena, Inspector, Proyecto y Consola, con barra de herramientas y modo Play. El jugador de consola permite comprobar el arranque del runtime. Los objetos se programan con scripts Luau desde la pestaña Código y se prueban en Play, con física (Jolt), sonido 3D (miniaudio), modelos 3D glTF, un jugador en tercera o primera persona e interfaz de juego (`ui.*`). El avance por etapas está en [docs/roadmap.md](docs/roadmap.md).
 
 ## Compilación
 
@@ -86,24 +86,47 @@ Un prefab es un objeto (con sus hijos) guardado como plantilla reutilizable, com
 
 La posición de cada copia es suya. Los datos de un terreno se copian al crear la copia y después son de ella (se sincroniza solo su configuración).
 
-### Física, sonido y jugador en primera persona
+### Física, sonido y jugador
 
-**Para probarlo rápido:** `build demo` abre `scenes/demo_fisica.scene.json` (una habitación con rampa, plataforma, cajas, una puerta programada, una fuente con sonido y música fuera). Pulsa **Play** y haz clic en la vista:
+**Para probarlo rápido:** `build demo` abre `scenes/demo_fisica.scene.json` (una habitación con rampa, plataforma, cajas, una casa, árboles, un barril, una puerta programada, el aldeano Tomás que habla contigo, una fuente con sonido y música fuera). Pulsa **Play** y haz clic en la vista. El jugador se ve en **tercera persona** (la cámara va detrás y se acerca si hay una pared en medio; el personaje gira hacia donde anda):
 
 | Tecla | Acción |
 |---|---|
 | **W A S D** | Andar · **Shift**: correr |
-| **Ratón** | Mirar |
+| **Ratón** | Mirar · **Rueda**: distancia de la cámara |
 | **Espacio** | Saltar (en el agua, nadar hacia arriba) |
-| **E** o **clic** | Usar lo que hay delante (por ejemplo, abrir la puerta) |
+| **E** o **clic** | Usar lo que hay delante (abrir la puerta, hablar con Tomás y pasar sus frases) |
+| **Tab** | Menú de la demo (botones con el ratón) |
 | **Esc** | Soltar el ratón (clic en la vista para volver) · **Ctrl+P**: detener |
 
 - **Colisiones sin configurar nada:** las piezas (cajas, rampas) y los terrenos son suelo y paredes. Se sube por rampas y escalones de hasta 45 cm.
 - **Agregar componente → Cuerpo físico:** *Dinámico* cae, choca, se empuja y flota en el agua del terreno; *Cinemático* lo mueve un script y empuja a los demás; *Zona (trigger)* no choca y avisa a los scripts con `onTriggerEnter` / `onTriggerExit` (como la campana de la demo).
 - **Fuente de audio:** un WAV de `Content/sounds` en bucle o una vez, con volumen y distancias. En 3D se oye a volumen completo dentro de la distancia mínima y deja de oírse en la máxima: al acercarte a la fuente de la demo sube el sonido del agua. **>** lo escucha desde el Inspector.
-- **Jugador:** **Objeto → Jugador (primera persona)** coloca dónde aparece (la flecha verde indica hacia dónde mira). Sin Jugador, Play usa la cámara del editor y la física funciona igual.
+- **Jugador:** **Objeto → Jugador** coloca dónde aparece (la flecha verde indica hacia dónde mira), con el aldeano de ejemplo como modelo. En su componente se elige la **Cámara** (tercera o primera persona) y la distancia. Lo que cuelga del jugador (su modelo, un arma) no choca con él. Sin Jugador, Play usa la cámara del editor y la física funciona igual.
 - **Scripts:** `entity.velocity`, `entity:applyImpulse(v)`, `entity:playSound(clip)`, `audio.play(clip)`, `scene.player()` y los callbacks `onTriggerEnter`, `onTriggerExit` y `onCollision`. Jerarquía y objetos nuevos: `entity.position` y `entity.rotation` son del mundo, `entity.localPosition` y `entity.localRotation` relativas al padre, `entity.parent` (se puede cambiar), `entity.active`, `scene.spawn(prefab, posicion)` y `entity:destroy()`.
 - `ge3d_sound_gen <carpeta Content>` regenera los sonidos de ejemplo (sintetizados, WAV de 16 bits a 44,1 kHz).
+
+### Modelos 3D (glTF)
+
+Los modelos `.gltf` / `.glb` de `Content` aparecen en el **Proyecto** con un icono de figura. Arrastra uno a la **Escena** (o a la Jerarquía) y se crea un objeto con el componente **Modelo** donde lo sueltes; con **Alt** se asigna al objeto de debajo. En el Inspector se cambia el archivo y el **colisionador**: *Ninguno* (decoración), *Caja* (la que lo envuelve) o *Malla exacta* (con Cuerpo físico dinámico se usa su envolvente convexa). Se seleccionan con clic sobre su forma y se reimportan solos al guardar el archivo.
+
+- **Convenciones:** 1 unidad = 1 m, los pies en y = 0 y el modelo mirando hacia +Z en glTF (Blender: «+Y arriba», exportado tal cual); el motor lo gira para que mire hacia delante (-Z). Se importan mallas con sus transformaciones, colores de vértice, color base del material y texturas (incrustadas, en base64 o en archivos al lado) que se reescalan a 128 × 128 con nearest: pensado para pixel art de pocos polígonos. Sin animaciones por ahora.
+- `python tools/model_gen.py projects/pueblo/Content [--force]` regenera los modelos de ejemplo (aldeano, árbol, casita y barril).
+
+### Interfaz del juego (`ui.*`)
+
+Los scripts dibujan la interfaz cada fotograma desde `onUpdate` (modo inmediato), en **píxeles de la escena**: `ui.width()` × `ui.height()` es la resolución pixel art, así que la interfaz cae en la misma rejilla que la imagen. El texto usa una fuente de píxeles monoespaciada de 7 × 13 por carácter.
+
+```lua
+ui.panel(4, 4, 86, 30)                                 -- recuadro de diálogo (relleno y borde opcionales)
+ui.text("Vida", 9, 7, "#ffd66e")                       -- color, escala entera, "left" | "center" | "right"
+ui.bar(9, 21, 76, 6, vida / maxima, "#d94c4c")         -- barra 0..1 con color y fondo
+if ui.button("Continuar", x, y, 100, 16) then ... end  -- true el fotograma en que se pulsa
+ui.cursor(true)                                        -- suelta el ratón para menús; false lo devuelve a la cámara
+ui.wrap(texto, ancho), ui.textWidth(texto), ui.lineHeight(), ui.mouse(), ui.rect(...)
+```
+
+Ejemplos: `scripts/hud.luau` (vida, monedas, misión y menú con Tab) y `scripts/aldeano.luau` (diálogo por frases con respuestas Sí/No). Como el tamaño de la interfaz sigue al de los píxeles de la escena, en una vista pequeña se ve grande: diseña para la resolución final (por ejemplo, 640 × 360 a pantalla completa con píxel 3).
 
 ### Scripts (Luau)
 

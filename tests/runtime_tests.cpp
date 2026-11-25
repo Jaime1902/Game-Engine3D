@@ -1,5 +1,6 @@
 #include "ge3d/History.hpp"
 #include "ge3d/Materials.hpp"
+#include "ge3d/Model.hpp"
 #include "ge3d/Prefab.hpp"
 #include "ge3d/Primitives.hpp"
 #include "ge3d/SceneIO.hpp"
@@ -8,6 +9,7 @@
 #include <cmath>
 #include <cctype>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <map>
 #include <string>
@@ -653,6 +655,60 @@ void testPrefabs() {
            "el enlace al prefab se guarda");
 }
 
+// Modelos glTF: importación, orientación, colores, texturas y errores.
+void testModels() {
+    const std::string content = GE3D_CONTENT_DIR;
+    const auto villager = ge3d::loadModel(content + "/models/aldeano.gltf");
+    expect(villager.triangleCount() > 50 && villager.parts.size() == 1, "el aldeano se importa");
+    expect(std::abs(villager.boundsMin.y) < 1e-4f && villager.boundsMax.y > 1.6f && villager.boundsMax.y < 1.8f,
+           "pies en y = 0 y 1,7 m de alto");
+    // Los ojos (color casi negro) estaban en +Z en glTF: tras importar quedan delante, en -Z.
+    bool eyesInFront = false;
+    for (const auto& vertex : villager.vertices) {
+        if ((vertex.color & 0xFFu) < 0x30u && vertex.position[1] > 1.4f) eyesInFront = eyesInFront || vertex.position[2] < -0.1f;
+    }
+    expect(eyesInFront, "el modelo mira hacia delante (-Z)");
+    const auto barrel = ge3d::loadModel(content + "/models/barril.gltf");
+    expect(barrel.textures.size() == 1 && barrel.textures[0].width == 16 && barrel.materials[0].texture == 0, "textura incrustada");
+
+    namespace fs = std::filesystem;
+    const auto broken = fs::temp_directory_path() / "ge3d_roto.gltf";
+    { std::ofstream(broken) << "{ esto no es json"; }
+    bool failed = false;
+    try {
+        (void)ge3d::loadModel(broken);
+    } catch (const std::runtime_error& error) {
+        failed = std::string(error.what()).find("ge3d_roto.gltf") != std::string::npos;
+    }
+    expect(failed, "un glTF roto da un error con su nombre");
+    fs::remove(broken);
+
+    ge3d::ModelLibrary library(content);
+    const auto shared = library.get("models/arbol.gltf");
+    expect(shared && library.get("models/arbol.gltf") == shared, "la biblioteca comparte el modelo cargado");
+    expect(!library.get("models/no_existe.gltf") && !library.lastError("models/no_existe.gltf").empty(), "modelo inexistente");
+    expect(!ge3d::isValidModelPath("../fuera.gltf") && ge3d::isValidModelPath("models/a.glb"), "rutas de modelo");
+
+    ge3d::Scene scene;
+    auto entity = scene.makeEntity("Casa");
+    entity.model = ge3d::ModelComponent{"models/casita.gltf", ge3d::ColliderShape::box};
+    scene.add(std::move(entity));
+    const auto loaded = ge3d::parseScene(ge3d::serializeScene(scene));
+    expect(loaded.entities()[0].model && loaded.entities()[0].model->collider == ge3d::ColliderShape::box, "el componente Modelo se guarda");
+
+    // Cámara del jugador: tercera persona por defecto; primera persona y distancia se guardan.
+    ge3d::Scene players;
+    auto player = players.makeEntity("Jugador");
+    player.player = ge3d::PlayerComponent{};
+    expect(player.player->camera == ge3d::PlayerCamera::thirdPerson, "el jugador empieza en tercera persona");
+    player.player->camera = ge3d::PlayerCamera::firstPerson;
+    player.player->cameraDistance = 6.5f;
+    players.add(std::move(player));
+    const auto reloaded = ge3d::parseScene(ge3d::serializeScene(players));
+    const auto& saved = reloaded.entities()[0].player;
+    expect(saved && saved->camera == ge3d::PlayerCamera::firstPerson && saved->cameraDistance == 6.5f, "la camara del jugador se guarda");
+}
+
 void testFiles() {
     namespace fs = std::filesystem;
     const auto folder = fs::temp_directory_path() / ("ge3d_tests_" + ge3d::Uuid::generate().toString());
@@ -719,6 +775,7 @@ int main() {
     testMultiCommands();
     testHierarchy();
     testPrefabs();
+    testModels();
     testSerialization();
     testVoxels();
     testTerrainHistory();

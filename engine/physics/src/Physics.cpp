@@ -145,8 +145,12 @@ struct PhysicsWorld::Impl final : public JPH::ContactListener, public JPH::Chara
 
     // Qué hay creado por cada entidad, para detectar cambios y retirar lo que sobra.
     enum class Kind { piece, terrain, heightmap };
+    PhysicsWorld::ModelSource models;
+
     struct Tracked {
         Kind kind{};
+        std::optional<ModelComponent> model;
+        const void* modelData{};
         std::vector<JPH::BodyID> bodies;               // pieza: 1; terrenos: uno por chunk (o inválido si vacío)
         std::vector<std::uint64_t> revisions;          // terrenos: revisión de cada chunk
         const void* data{};                            // terrenos: rejilla de la que salen
@@ -253,12 +257,54 @@ struct PhysicsWorld::Impl final : public JPH::ContactListener, public JPH::Chara
         return id;
     }
 
+    // Colisionador de un modelo: caja envolvente, malla exacta (estática) o envolvente convexa (móvil).
+    JPH::RefConst<JPH::Shape> modelShape(const Entity& entity, const ModelData& model, bool moving, float& volume) {
+        const auto& s = entity.transform.scale;
+        const JPH::Vec3 low{model.boundsMin.x * s.x, model.boundsMin.y * s.y, model.boundsMin.z * s.z};
+        const JPH::Vec3 high{model.boundsMax.x * s.x, model.boundsMax.y * s.y, model.boundsMax.z * s.z};
+        const JPH::Vec3 half = JPH::Vec3::sMax((high - low) * 0.5f, JPH::Vec3::sReplicate(0.01f));
+        volume = 8.0f * half.GetX() * half.GetY() * half.GetZ();
+        const auto box = [&]() -> JPH::RefConst<JPH::Shape> {
+            const float radius = std::min(0.05f, half.ReduceMin() * 0.5f);
+            return JPH::RotatedTranslatedShapeSettings((low + high) * 0.5f, JPH::Quat::sIdentity(), new JPH::BoxShape(half, radius))
+                .Create()
+                .Get();
+        };
+        if (entity.model->collider == ColliderShape::box) return box();
+        if (moving) {
+            JPH::Array<JPH::Vec3> points;
+            const std::size_t step = std::max<std::size_t>(1, model.vertices.size() / 2048);
+            for (std::size_t i = 0; i < model.vertices.size(); i += step) {
+                const auto& p = model.vertices[i].position;
+                points.push_back({p[0] * s.x, p[1] * s.y, p[2] * s.z});
+            }
+            const auto result = JPH::ConvexHullShapeSettings(points, 0.02f).Create();
+            return result.HasError() ? box() : result.Get();
+        }
+        JPH::VertexList vertices;
+        vertices.reserve(model.vertices.size());
+        for (const auto& v : model.vertices) vertices.push_back(JPH::Float3(v.position[0] * s.x, v.position[1] * s.y, v.position[2] * s.z));
+        JPH::IndexedTriangleList triangles;
+        triangles.reserve(model.indices.size() / 3);
+        for (std::size_t i = 0; i + 2 < model.indices.size(); i += 3) {
+            triangles.push_back(JPH::IndexedTriangle(model.indices[i], model.indices[i + 1], model.indices[i + 2]));
+        }
+        const auto result = JPH::MeshShapeSettings(std::move(vertices), std::move(triangles)).Create();
+        return result.HasError() ? box() : result.Get();
+    }
+
     // Pieza (o cuerpo sin forma, como una caja del tamaño de la escala).
     void createPiece(const Entity& entity, Tracked& item) {
         const auto& t = entity.transform;
         JPH::RefConst<JPH::Shape> shape;
         const auto primitive = entity.shape ? entity.shape->primitive : Primitive::box;
-        if (primitive == Primitive::box) {
+        float modelVolume = 0.0f;
+        const auto modelData = !entity.shape && entity.model && entity.model->collider != ColliderShape::none && models
+                                   ? models(entity.model->path) : nullptr;
+        item.modelData = modelData.get();
+        if (modelData) {
+            shape = modelShape(entity, *modelData, entity.body.has_value(), modelVolume);
+        } else if (primitive == Primitive::box) {
             const JPH::Vec3 half{std::max(0.01f, t.scale.x * 0.5f), std::max(0.01f, t.scale.y * 0.5f), std::max(0.01f, t.scale.z * 0.5f)};
             const float radius = std::min(0.05f, half.ReduceMin() * 0.5f);
             shape = JPH::BoxShapeSettings(half, radius).Create().Get();
@@ -287,7 +333,7 @@ struct PhysicsWorld::Impl final : public JPH::ContactListener, public JPH::Chara
             if (dynamic) {
                 settings.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
                 // Masa automática: una caja de madera hueca (150 kg/m³), que el jugador puede empujar.
-                const float volume = t.scale.x * t.scale.y * t.scale.z * (primitive == Primitive::ramp ? 0.5f : 1.0f);
+                const float volume = modelData ? modelVolume : t.scale.x * t.scale.y * t.scale.z * (primitive == Primitive::ramp ? 0.5f : 1.0f);
                 settings.mMassPropertiesOverride.mMass = entity.body->mass > 0.0f ? entity.body->mass : std::max(0.1f, volume * 150.0f);
             }
         } else {
@@ -360,7 +406,9 @@ struct PhysicsWorld::Impl final : public JPH::ContactListener, public JPH::Chara
         auto& bi = bodyInterface();
         for (auto& [id, item] : tracked) item.seen = false;
         for (const auto& original : current.entities()) {
-            if (original.player || !activeInHierarchy(current, original)) continue;   // el jugador es el personaje, no un cuerpo
+            // El jugador es el personaje, no un cuerpo; lo que cuelga de él (su modelo, un arma...) tampoco choca.
+            if (original.player || !activeInHierarchy(current, original)) continue;
+            if (character && isAncestor(current, characterOwner, original.id)) continue;
             // Los cuerpos viven en el mundo: con padres, se usa la transformación combinada.
             Entity worldCopy;
             const bool hasParent = original.parent != 0;
@@ -369,7 +417,8 @@ struct PhysicsWorld::Impl final : public JPH::ContactListener, public JPH::Chara
                 worldCopy.transform = worldTransform(current, original);
             }
             const Entity& entity = hasParent ? worldCopy : original;
-            const bool piece = entity.shape.has_value() || entity.body.has_value();
+            const bool collidingModel = entity.model && entity.model->collider != ColliderShape::none;
+            const bool piece = entity.shape.has_value() || entity.body.has_value() || collidingModel;
             const bool heightmap = entity.heightmap && entity.heightmap->data;
             const bool voxels = entity.terrain && entity.terrain->voxels;
             if (!piece && !heightmap && !voxels) continue;
@@ -378,13 +427,22 @@ struct PhysicsWorld::Impl final : public JPH::ContactListener, public JPH::Chara
             item.seen = true;
             const Kind kind = heightmap ? Kind::heightmap : voxels ? Kind::terrain : Kind::piece;
             const bool scaleChanged = !(item.transform.scale == entity.transform.scale);
-            if (!created && (item.kind != kind || scaleChanged || item.shape != entity.shape || item.body != entity.body)) {
+            // Un modelo reimportado (archivo cambiado) también rehace el cuerpo.
+            const void* currentModel = collidingModel && !entity.shape && models ? models(entity.model->path).get() : nullptr;
+            if (!created && (item.kind != kind || scaleChanged || item.shape != entity.shape || item.body != entity.body ||
+                             item.model != entity.model || (kind == Kind::piece && item.modelData != currentModel))) {
                 destroy(item, bi);
                 created = true;
             }
             if (kind == Kind::piece) {
                 if (created) {
-                    item = Tracked{kind, {}, {}, nullptr, entity.transform, entity.shape, entity.body, 0.0f, true};
+                    item = Tracked{};
+                    item.kind = kind;
+                    item.transform = entity.transform;
+                    item.shape = entity.shape;
+                    item.body = entity.body;
+                    item.model = entity.model;
+                    item.seen = true;
                     createPiece(entity, item);
                     continue;
                 }
@@ -407,8 +465,14 @@ struct PhysicsWorld::Impl final : public JPH::ContactListener, public JPH::Chara
             const int chunks = heightmap ? entity.heightmap->data->chunkCount() : entity.terrain->voxels->chunkCount();
             if (created || item.data != data || item.cellSize != cell || static_cast<int>(item.bodies.size()) != chunks) {
                 destroy(item, bi);
-                item = Tracked{kind, std::vector<JPH::BodyID>(static_cast<std::size_t>(chunks)),
-                               std::vector<std::uint64_t>(static_cast<std::size_t>(chunks), ~0ull), data, entity.transform, {}, {}, cell, true};
+                item = Tracked{};
+                item.kind = kind;
+                item.bodies.assign(static_cast<std::size_t>(chunks), JPH::BodyID());
+                item.revisions.assign(static_cast<std::size_t>(chunks), ~0ull);
+                item.data = data;
+                item.transform = entity.transform;
+                item.cellSize = cell;
+                item.seen = true;
             } else if (!(item.transform == entity.transform)) {
                 for (auto id : item.bodies) {
                     if (!id.IsInvalid()) bi.SetPositionAndRotation(id, toJolt(entity.transform.position), toQuat(entity.transform.rotationDegrees), JPH::EActivation::DontActivate);
@@ -592,6 +656,10 @@ struct PhysicsWorld::Impl final : public JPH::ContactListener, public JPH::Chara
 
 PhysicsWorld::PhysicsWorld() : impl_(std::make_unique<Impl>()) {}
 PhysicsWorld::~PhysicsWorld() = default;
+
+void PhysicsWorld::setModelSource(ModelSource source) {
+    impl_->models = std::move(source);
+}
 
 void PhysicsWorld::build(const Scene& scene) {
     impl_->scene = &scene;

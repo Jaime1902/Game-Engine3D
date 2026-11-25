@@ -11,6 +11,7 @@ bool sameComponent(const Entity& a, const Entity& b, const std::string& name) {
     if (name == "active") return a.active == b.active;
     if (name == "transform") return a.transform == b.transform;
     if (name == "shape") return a.shape == b.shape;
+    if (name == "model") return a.model == b.model;
     // Terrenos: los datos son de cada instancia; se compara su configuración.
     if (name == "terrain") return a.terrain.has_value() == b.terrain.has_value() && (!a.terrain || a.terrain->settings == b.terrain->settings);
     if (name == "heightmap") {
@@ -28,6 +29,7 @@ void copyComponent(Entity& to, const Entity& from, const std::string& name) {
     else if (name == "active") to.active = from.active;
     else if (name == "transform") to.transform = from.transform;
     else if (name == "shape") to.shape = from.shape;
+    else if (name == "model") to.model = from.model;
     else if (name == "terrain") {
         if (!from.terrain) to.terrain.reset();
         else if (!to.terrain) {

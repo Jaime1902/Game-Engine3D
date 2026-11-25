@@ -348,6 +348,12 @@ std::string serializeScene(const Scene& scene) {
         }
         if (entity.terrain) item["terrain"] = terrainJson(entity);
         if (entity.heightmap) item["heightmap"] = heightmapJson(entity);
+        if (entity.model) {
+            Json model = Json::object();
+            model["path"] = entity.model->path;
+            model["collider"] = entity.model->collider == ColliderShape::none ? "none" : entity.model->collider == ColliderShape::box ? "box" : "mesh";
+            item["model"] = std::move(model);
+        }
         if (entity.body) {
             Json body = Json::object();
             body["type"] = bodyTypeName(entity.body->type);
@@ -377,6 +383,8 @@ std::string serializeScene(const Scene& scene) {
             player["runSpeed"] = tidy(p.runSpeed);
             player["jumpSpeed"] = tidy(p.jumpSpeed);
             player["mouseSensitivity"] = tidy(p.mouseSensitivity);
+            player["camera"] = p.camera == PlayerCamera::firstPerson ? "first" : "third";
+            player["cameraDistance"] = tidy(p.cameraDistance);
             item["player"] = std::move(player);
         }
         if (entity.script) {
@@ -520,6 +528,25 @@ Scene parseSceneData(std::string_view text, bool generateTerrains) {
                 const auto settings = readTerrainSettings(terrainJson, terrainAt);
                 entity.terrain = generateTerrains ? makeTerrain(settings) : TerrainComponent{settings, nullptr};
             }
+            if (number >= 8 && item.contains("model")) {
+                const auto& json = item["model"];
+                const std::string modelAt = at + " (modelo)";
+                if (!json.is_object()) fail(modelAt + ": debe ser un objeto");
+                ModelComponent model;
+                model.path = readString(json, "path", modelAt);
+                if (!model.path.empty()) {
+                    const auto& p = model.path;
+                    const bool valid = p.find("..") == std::string::npos && p.front() != '/' && p.front() != '\\' &&
+                                       p.find(':') == std::string::npos && (p.ends_with(".gltf") || p.ends_with(".glb"));
+                    if (!valid) fail(modelAt + ": ruta de modelo invalida \"" + p + "\"");
+                }
+                const auto collider = readString(json, "collider", modelAt);
+                if (collider == "none") model.collider = ColliderShape::none;
+                else if (collider == "box") model.collider = ColliderShape::box;
+                else if (collider == "mesh") model.collider = ColliderShape::mesh;
+                else fail(modelAt + ": colisionador desconocido \"" + collider + "\"");
+                entity.model = std::move(model);
+            }
             if (number >= 6 && item.contains("body")) {
                 const auto& json = item["body"];
                 const std::string bodyAt = at + " (cuerpo fisico)";
@@ -562,6 +589,16 @@ Scene parseSceneData(std::string_view text, bool generateTerrains) {
                 player.runSpeed = static_cast<float>(readNumber(json, "runSpeed", playerAt, 0, 100));
                 player.jumpSpeed = static_cast<float>(readNumber(json, "jumpSpeed", playerAt, 0, 100));
                 player.mouseSensitivity = static_cast<float>(readNumber(json, "mouseSensitivity", playerAt, 0.001, 10));
+                // Opcionales (añadidos después de la versión 6): por defecto, tercera persona a 4 m.
+                if (json.contains("camera")) {
+                    const auto camera = readString(json, "camera", playerAt);
+                    if (camera == "first") player.camera = PlayerCamera::firstPerson;
+                    else if (camera == "third") player.camera = PlayerCamera::thirdPerson;
+                    else fail(playerAt + ": camara desconocida \"" + camera + "\" (first o third)");
+                }
+                if (json.contains("cameraDistance")) {
+                    player.cameraDistance = static_cast<float>(readNumber(json, "cameraDistance", playerAt, 0.5, 50));
+                }
                 entity.player = player;
             }
             if (number >= 5 && item.contains("script")) {

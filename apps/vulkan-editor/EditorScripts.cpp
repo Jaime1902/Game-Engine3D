@@ -111,6 +111,18 @@ void EditorView::watchScripts(bool force) {
         }
     }
     std::sort(soundList_.begin(), soundList_.end());
+    // Modelos glTF / GLB de todo Content; los ya importados se reimportan si cambió su archivo.
+    modelList_.clear();
+    for (auto it = std::filesystem::recursive_directory_iterator(contentRoot_, error);
+         !error && it != std::filesystem::recursive_directory_iterator(); it.increment(error)) {
+        const auto extension = it->path().extension();
+        if (!it->is_regular_file(error) || (extension != ".gltf" && extension != ".glb")) continue;
+        auto relative = ge3d::pathToUtf8(std::filesystem::relative(it->path(), contentRoot_, error));
+        std::replace(relative.begin(), relative.end(), '\\', '/');
+        if (ge3d::isValidModelPath(relative)) modelList_.push_back(relative);
+    }
+    std::sort(modelList_.begin(), modelList_.end());
+    models_.refresh();
     // Prefabs guardados (desde el modo prefab o por fuera): sus copias en esta escena se actualizan.
     syncPrefabs(false);
     // Cambios hechos fuera del editor (o con otro editor de texto): se recargan como al guardar.
@@ -260,9 +272,19 @@ void EditorView::drawScriptApi() {
                            "scene.send(nombre, evento, valor)\n"
                            "scene.time() -> segundos desde Play\n"
                            "input.isDown(\"E\"), input.wasPressed(\"Space\")   -- A-Z, 0-9, Space, Enter,\n"
-                           "                                                -- Left, Right, Up, Down, Shift, Ctrl\n"
+                           "                                                -- Left, Right, Up, Down, Shift, Ctrl,\n"
+                           "                                                -- Escape, Tab\n"
                            "log(...)  (o print)                             -- Consola\n"
                            "vector.create(x, y, z), math, string, table");
+    ImGui::SeparatorText("Interfaz (en onUpdate, pixeles de la escena)");
+    ImGui::TextUnformatted("ui.width(), ui.height(), ui.mouse() -> x, y o nil\n"
+                           "ui.rect(x, y, ancho, alto, \"#rrggbbaa\")\n"
+                           "ui.panel(x, y, ancho, alto, [relleno], [borde])\n"
+                           "ui.text(texto, x, y, [color], [escala], [\"left\"|\"center\"|\"right\"])\n"
+                           "ui.bar(x, y, ancho, alto, valor0a1, [color], [fondo])\n"
+                           "ui.button(texto, x, y, ancho, alto) -> true al pulsar\n"
+                           "ui.wrap(texto, ancho), ui.textWidth(texto), ui.lineHeight()\n"
+                           "ui.cursor(true)                     -- raton libre para menus");
     ImGui::SeparatorText("Limites");
     ImGui::TextUnformatted("1 ms por llamada y 3,5 ms por fotograma para todos los scripts.\n"
                            "Sin acceso a archivos ni al sistema. Un error desactiva el script hasta Stop.");
@@ -606,7 +628,11 @@ void EditorView::drawScriptComponent(ge3d::Entity& entity, const ge3d::Entity& f
 
 ge3d::ScriptInput EditorView::gatherInput() const {
     ge3d::ScriptInput input;
-    if (ImGui::GetIO().WantTextInput) return input;
+    if (ImGui::GetIO().WantTextInput) {
+        input.uiWidth = static_cast<float>(sceneSize_.x);
+        input.uiHeight = static_cast<float>(sceneSize_.y);
+        return input;
+    }
     const auto add = [&](ImGuiKey key, const std::string& name) {
         if (ImGui::IsKeyDown(key)) input.down.push_back(name);
         if (ImGui::IsKeyPressed(key, false)) input.pressed.push_back(name);
@@ -621,5 +647,19 @@ ge3d::ScriptInput EditorView::gatherInput() const {
     add(ImGuiKey_DownArrow, "Down");
     add(ImGuiKey_LeftShift, "Shift");
     add(ImGuiKey_LeftCtrl, "Ctrl");
+    add(ImGuiKey_Escape, "Escape");
+    add(ImGuiKey_Tab, "Tab");
+    // Interfaz: pantalla y ratón en píxeles de la escena (sin ratón si lo tiene capturado la cámara).
+    const float ratio = sceneSize_.x > 0 ? uiSize_.x / static_cast<float>(sceneSize_.x) : 1.0f;
+    input.uiWidth = static_cast<float>(sceneSize_.x);
+    input.uiHeight = static_cast<float>(sceneSize_.y);
+    const ImVec2 mouse = ImGui::GetIO().MousePos;
+    if (!mouseCaptured_ && uiHovered_ && ratio > 0.0f && mouse.x >= uiOrigin_.x && mouse.y >= uiOrigin_.y &&
+        mouse.x < uiOrigin_.x + uiSize_.x && mouse.y < uiOrigin_.y + uiSize_.y) {
+        input.mouseX = std::floor((mouse.x - uiOrigin_.x) / ratio);
+        input.mouseY = std::floor((mouse.y - uiOrigin_.y) / ratio);
+        input.mouseDown = ImGui::IsMouseDown(ImGuiMouseButton_Left);
+        input.mousePressed = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+    }
     return input;
 }

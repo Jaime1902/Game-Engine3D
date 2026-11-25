@@ -20,8 +20,9 @@ namespace ge3d {
 //   6  "body" { type, mass, friction, restitution }, "audio" { clip, volume, minDistance, maxDistance, loop,
 //      playOnStart, spatial } y "player" { height, radius, walkSpeed, runSpeed, jumpSpeed, mouseSensitivity }.
 //   7  "parent": UUID del padre (transformación local) y "prefab" { asset, source, overrides[] }.
+//   8  "model" { path, collider: none | box | mesh }: modelo 3D importado.
 // Al leer una versión anterior se migra en memoria; al guardar siempre se escribe la actual.
-inline constexpr int sceneFormatVersion = 7;
+inline constexpr int sceneFormatVersion = 8;
 
 // El contenido no es una escena válida. La escena abierta no debe sustituirse.
 class SceneFormatError : public std::runtime_error {

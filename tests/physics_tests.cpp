@@ -77,6 +77,20 @@ void testCharacter() {
         highest = std::max(highest, world.character().feet.y);
     }
     expect(highest > 1.4f, "el jugador sube la rampa");
+
+    // Lo que cuelga del jugador (su modelo, un arma...) no choca con él: puede andar con una caja hija.
+    ge3d::Scene carried;
+    addPiece(carried, "Suelo", ge3d::Primitive::box, {0, -0.5f, 0}, {40, 1, 40});
+    const auto owner = addPlayer(carried, {0, 0.05f, 0});
+    const auto held = addPiece(carried, "Escudo", ge3d::Primitive::box, {0, 1, -0.3f}, {0.6f, 0.8f, 0.2f});
+    carried.find(held)->parent = owner;
+    carried.find(held)->transform.position = {0, 1, -0.3f};
+    ge3d::PhysicsWorld walker;
+    walker.build(carried);
+    simulate(walker, carried, 0.3f);
+    simulate(walker, carried, 1.0f, {{0, 0, -1}});
+    expect(walker.character().feet.z < -2.5f && walker.stats().bodies == 2,
+           "los hijos del jugador no son cuerpos (solo el suelo y el cuerpo interno del personaje)");
 }
 
 void testWallPushAndZone() {
@@ -180,6 +194,30 @@ void testKinematicAndScripts() {
     expect(hit.has_value(), "un rayo hacia abajo encuentra algo");
 }
 
+// Colisionadores de modelos: malla exacta estática y envolvente convexa en un cuerpo dinámico.
+void testModelColliders() {
+    ge3d::ModelLibrary library(GE3D_CONTENT_DIR);
+    ge3d::Scene scene;
+    addPiece(scene, "Suelo", ge3d::Primitive::box, {0, -0.5f, 0}, {40, 1, 40});
+    auto house = scene.makeEntity("Casa", {{0, 0, 0}, {}, {1, 1, 1}});
+    house.model = ge3d::ModelComponent{"models/casita.gltf", ge3d::ColliderShape::mesh};
+    scene.add(std::move(house));
+    // Una caja cae sobre el tejado (malla exacta): se queda encima, no lo atraviesa.
+    const auto box = addPiece(scene, "Caja", ge3d::Primitive::box, {1.2f, 8, 1.0f}, {0.4f, 0.4f, 0.4f}, ge3d::BodyComponent{});
+    auto barrel = scene.makeEntity("Barril", {{6, 3, 0}, {}, {1, 1, 1}});
+    barrel.model = ge3d::ModelComponent{"models/barril.gltf", ge3d::ColliderShape::mesh};
+    barrel.body = ge3d::BodyComponent{};
+    const auto barrelId = scene.add(std::move(barrel));
+    ge3d::PhysicsWorld world;
+    world.setModelSource([&](const std::string& path) { return library.get(path); });
+    world.build(scene);
+    simulate(world, scene, 0.6f);
+    expect(scene.find(box)->transform.position.y > 2.5f, "la caja choca con el tejado de la casa");
+    simulate(world, scene, 3.0f);
+    const float barrelY = scene.find(barrelId)->transform.position.y;
+    expect(std::abs(barrelY) < 0.1f, "un barril dinamico se apoya en el suelo (pies en y = 0)");
+}
+
 void testAudio() {
     ge3d::Scene scene;
     auto emitter = scene.makeEntity("Fuente", ge3d::Primitive::box);
@@ -230,6 +268,7 @@ int main() {
     testWater();
     testVoxelGround();
     testKinematicAndScripts();
+    testModelColliders();
     testAudio();
     if (failures > 0) {
         std::cerr << failures << " comprobaciones fallidas\n";

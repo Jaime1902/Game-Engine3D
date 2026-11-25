@@ -3,15 +3,17 @@
 // Descriptores (set 0):
 //   binding 0  FrameData: cámara, sol, estilo y tabla de materiales (capas de textura por orientación y tinte).
 //   binding 1  Texture2DArray con todas las texturas del catálogo, filtro nearest (pixel art).
+//   binding 2  Texture2DArray con las texturas de los modelos glTF (128 x 128, capa 0 blanca).
 //
 // Push constants (128 bytes):
 //   model  matriz del objeto (vóxeles: transformación del terreno * tamaño del vóxel)
 //   fade   cuadrícula: xy centro del desvanecimiento en coordenadas locales, z radio
 //   grid   cuadrícula: xy desplazamiento en el mundo, z separación;  w = modo
-//          (1 cuadrícula, 2 pieza, 3 vóxeles, 4 terreno de malla, 5 agua)
+//          (1 cuadrícula, 2 pieza, 3 vóxeles, 4 terreno de malla, 5 agua, 6 modelo)
 //   data   pieza: 6 materiales de 16 bits empaquetados en x, y, z;  vóxeles: origen del chunk (x, y, z)
 //          terreno de malla: xy origen del chunk en celdas, zw materiales de las 4 capas (16 bits cada uno)
 //          agua: xy origen del chunk en celdas, z material del agua
+//          modelo: x capa de textura + 1 (0 = sin textura), y color base RGBA8
 //   extra  x > 0: resaltar (mezcla con blanco);  y: metros por celda del terreno de malla
 //
 // Salidas: color y normal del mundo (para los contornos de la pasada de post). normal.a = 0 en lo que
@@ -42,6 +44,7 @@ struct ScenePush {
 
 [[vk::binding(0, 0)]] ConstantBuffer<FrameData> frame;
 [[vk::binding(1, 0)]] Sampler2DArray textures;
+[[vk::binding(2, 0)]] Sampler2DArray modelTextures;
 [[vk::push_constant]] ConstantBuffer<ScenePush> scene;
 
 static const float modeGrid = 1.0;
@@ -73,13 +76,20 @@ struct WaterVertex {
     [[vk::location(3)]] uint cell : TEXCOORD1;
 };
 
+struct ModelVertex {
+    [[vk::location(0)]] float3 position : POSITION;
+    [[vk::location(1)]] float3 normal : NORMAL;
+    [[vk::location(2)]] float2 uv : TEXCOORD0;
+    [[vk::location(3)]] float4 color : COLOR;      // color del vértice (RGBA8 normalizado)
+};
+
 struct Pixel {
     float4 position : SV_Position;
-    float4 color : COLOR;          // rgb tinte (o color plano); w: 0 plano, 1 con textura, 2 terreno de malla, 3 agua
+    float4 color : COLOR;          // rgb tinte (o color plano); w: 0 plano, 1 con textura, 2 terreno de malla, 3 agua, 4 modelo
     float3 texcoord : TEXCOORD0;   // uv en repeticiones de textura y capa del array
     float2 local : TEXCOORD1;      // cuadrícula: coordenadas locales xz
     float3 normal : TEXCOORD2;     // normal del mundo
-    float4 weights : TEXCOORD3;    // terreno de malla: pesos de las capas;  agua: x profundidad
+    float4 weights : TEXCOORD3;    // terreno de malla: pesos de las capas;  agua: x profundidad;  modelo: x alfa
     float3 world : TEXCOORD5;      // posición en el mundo
     float3 meters : TEXCOORD4;     // terreno de malla: posición local en metros (para las UV)
 };
@@ -221,6 +231,24 @@ Pixel waterVertexMain(WaterVertex input) {
     return output;
 }
 
+float4 unpackRgba(uint packed) {
+    return float4(float(packed & 0xFFu), float((packed >> 8) & 0xFFu), float((packed >> 16) & 0xFFu),
+                  float(packed >> 24)) / 255.0;
+}
+
+Pixel modelVertexMain(ModelVertex input) {
+    Pixel output = emptyPixel();
+    float4 world = mul(scene.model, float4(input.position, 1.0));
+    output.position = mul(frame.viewProj, world);
+    output.normal = worldNormalOf(input.normal);
+    float4 base = unpackRgba(scene.data.y) * input.color;
+    output.color = float4(base.rgb, 4.0);
+    output.weights = float4(base.a, 0.0, 0.0, 0.0);
+    output.texcoord = float3(input.uv, float(scene.data.x) - 1.0);
+    output.world = world.xyz;
+    return output;
+}
+
 // Umbrales de tramado ordenado 4x4 (Bayer). Tramar en lugar de mezclar conserva píxeles nítidos
 // y colores sólidos, en lugar de mezclas semitransparentes que ensucian la paleta.
 static const float bayer[16] = {
@@ -251,7 +279,17 @@ Target fragmentMain(Pixel input) {
     float3 color = input.color.rgb;
     float3 normal = normalize(input.normal);
     float edge = 1.0;
-    if (input.color.w > 2.5) {
+    if (input.color.w > 3.5) {
+        // Modelo glTF: color base * color del vértice * textura (si tiene). Recorte por alfa: sin mezclas.
+        float alpha = input.weights.x;
+        if (input.texcoord.z > -0.5) {
+            float4 texel = modelTextures.Sample(input.texcoord);
+            color *= texel.rgb;
+            alpha *= texel.a;
+        }
+        if (alpha < 0.5) discard;
+        color *= lighting(normal);
+    } else if (input.color.w > 2.5) {
         // Agua pixel art: color por profundidad, oleaje cuantizado a la rejilla de la textura, brillos del
         // sol en bandas, espuma en la orilla y transparencia tramada donde hay poca profundidad.
         float depth = input.weights.x;

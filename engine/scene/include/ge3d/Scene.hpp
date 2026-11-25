@@ -118,6 +118,9 @@ struct AudioSourceComponent {
 };
 
 // Jugador en primera persona: en Play aparece donde está la entidad y la cámara pasa a sus ojos.
+// Cámara del jugador en Play: tercera persona (detrás, orbitando con el ratón) o primera persona (ojos).
+enum class PlayerCamera { thirdPerson, firstPerson };
+
 struct PlayerComponent {
     float height{1.75f};
     float radius{0.3f};
@@ -125,7 +128,20 @@ struct PlayerComponent {
     float runSpeed{7.0f};
     float jumpSpeed{5.0f};
     float mouseSensitivity{0.12f};
+    PlayerCamera camera{PlayerCamera::thirdPerson};
+    float cameraDistance{4.0f};     // tercera persona: metros detrás de la cabeza (la rueda del ratón lo cambia)
     friend bool operator==(const PlayerComponent&, const PlayerComponent&) = default;
+};
+
+// Modelo 3D importado (glTF/GLB de Content, p. ej. "models/aldeano.gltf"). El colisionador puede ser la
+// caja que lo envuelve, la malla exacta (si es estático; con Cuerpo físico dinámico se usa su envolvente
+// convexa) o ninguno (decoración).
+enum class ColliderShape { none, box, mesh };
+
+struct ModelComponent {
+    std::string path;
+    ColliderShape collider{ColliderShape::mesh};
+    friend bool operator==(const ModelComponent&, const ModelComponent&) = default;
 };
 
 // Ruta de sonido válida: relativa, sin "..", .wav.
@@ -153,6 +169,7 @@ struct Entity {
     Transform transform{};
     std::optional<PrefabLink> prefab;
     std::optional<ShapeComponent> shape;
+    std::optional<ModelComponent> model;
     std::optional<TerrainComponent> terrain;
     std::optional<HeightmapComponent> heightmap;
     std::optional<ScriptComponent> script;

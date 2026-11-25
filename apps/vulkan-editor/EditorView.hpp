@@ -5,6 +5,7 @@
 #include "ge3d/Prefab.hpp"
 #include "ge3d/Physics.hpp"
 #include "ge3d/Materials.hpp"
+#include "ge3d/Model.hpp"
 #include "ge3d/Scene.hpp"
 #include "ge3d/ScriptHost.hpp"
 #include <glm/glm.hpp>
@@ -95,6 +96,10 @@ public:
     static glm::mat4 modelMatrix(const ge3d::Transform& transform);
     // Matriz del objeto en el mundo (con la cadena de padres).
     [[nodiscard]] glm::mat4 worldMatrix(const ge3d::Entity& entity) const;
+    // Modelos glTF de Content: los comparten el render, la física, la selección y el Inspector.
+    [[nodiscard]] ge3d::ModelLibrary& models() const { return models_; }
+    // Entidad (con sus hijos) que no se dibuja: el jugador cuando la cámara está en sus ojos.
+    [[nodiscard]] ge3d::EntityId hiddenEntity() const;
 
 private:
     enum class Tool { hand, move, rotate, scale, paint, build, terrain };
@@ -137,6 +142,9 @@ private:
     [[nodiscard]] std::optional<Hit> raycast(ImVec2 mouse, ImVec2 origin, ImVec2 size) const;
     [[nodiscard]] std::optional<Hit> raycastTerrain(const ge3d::Entity& entity, const Ray& ray) const;
     [[nodiscard]] std::optional<Hit> raycastHeightmap(const ge3d::Entity& entity, const Ray& ray) const;
+    [[nodiscard]] std::optional<Hit> raycastModel(const ge3d::Entity& entity, const Ray& ray) const;
+    // Caja unidad (centrada) -> caja que envuelve el modelo en el mundo; nada si el modelo no carga.
+    [[nodiscard]] std::optional<glm::mat4> modelBoundsMatrix(const ge3d::Entity& entity) const;
     [[nodiscard]] glm::mat4 terrainMatrix(const ge3d::Entity& entity) const;
     void pick(ImVec2 mouse, ImVec2 origin, ImVec2 size);
     // Dibuja el contorno (y opcionalmente el relleno) de una pieza proyectada en la vista.
@@ -213,7 +221,11 @@ private:
     void updatePlay(float dt);
     void interactAhead();
     void drawPlayOverlay(ImDrawList* draw, ImVec2 origin, ImVec2 size);
+    // Interfaz de los scripts (ui.*) sobre la vista, en píxeles de la escena.
+    void drawScriptUi(ImDrawList* draw, ImVec2 origin, ImVec2 size);
     void createSpecial(Special kind);
+    // Objeto nuevo con el componente Modelo (soltado desde el Proyecto). Sin punto: delante de la cámara.
+    void createModelEntity(const std::string& asset, std::optional<glm::vec3> position, ge3d::EntityId parent);
     [[nodiscard]] glm::vec3 fpForward() const;
     bool editFloat(const char* label, float& value, float speed, float minimum, float maximum, const char* format,
                    const ge3d::Entity& frameStart, float labelWidth);
@@ -221,6 +233,8 @@ private:
     void drawBodyComponent(ge3d::Entity& entity, const ge3d::Entity& frameStart);
     void drawAudioComponent(ge3d::Entity& entity, const ge3d::Entity& frameStart);
     void drawPlayerComponent(ge3d::Entity& entity, const ge3d::Entity& frameStart);
+    void drawModelComponent(ge3d::Entity& entity, const ge3d::Entity& frameStart);
+    void updateThirdPersonCamera(float dt);
 
     // Paneles
     void drawMenuBar();
@@ -399,7 +413,20 @@ private:
     std::unique_ptr<ge3d::ScriptHost> scripts_;
     std::unique_ptr<ge3d::PhysicsWorld> physics_;
     std::unique_ptr<ge3d::AudioSystem> audio_;
-    bool firstPerson_ = false;
+    bool firstPerson_ = false;                    // en Play, la cámara es la del jugador (primera o tercera persona)
+    bool thirdPerson_ = false;                    // ... y está detrás de él
+    float tpDistance_ = 4.0f;                     // tercera persona: distancia pedida (rueda del ratón)
+    float tpCurrent_ = 4.0f;                      // distancia real (se acorta si hay una pared detrás)
+    glm::vec3 tpHead_{0.0f};                      // punto que mira la cámara (sobre la cabeza del jugador)
+    mutable ge3d::ModelLibrary models_;
+    // Interfaz de los scripts: fuente de píxeles (ProggyClean) a 13, 26, 39... px para que cada píxel de
+    // la fuente sea un número entero de píxeles de pantalla; dónde estaba la vista el último fotograma.
+    std::array<ImFont*, 6> uiFonts_{};
+    ImVec2 uiOrigin_{};
+    ImVec2 uiSize_{};
+    bool uiHovered_ = false;
+    bool scriptCursor_ = false;
+    std::vector<std::string> modelList_;          // modelos de Content (glTF / GLB)
     bool mouseCaptured_ = false;
     glm::vec3 fpEye_{0.0f};
     float fpYaw_ = 0.0f;
