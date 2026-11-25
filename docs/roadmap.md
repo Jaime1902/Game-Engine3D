@@ -1,6 +1,29 @@
 # Etapas de Game-Engine3D
 
-La base C++20 incluye un runtime compartido, ejecutables de consola y una escena en memoria con piso, caja y rampa. La compilación y CTest siguen pendientes de verificar.
+La base C++20 incluye un runtime compartido, ejecutables de consola, un editor Vulkan y escenas que se guardan en JSON.
+
+## Estado actual
+
+| Etapa | Estado | Hecho | Pendiente |
+|---|---|---|---|
+| 0 | ✅ Completa | CMake con presets MSVC y MinGW, runtime, CTest, sondeo Vulkan. | — |
+| 1 | ✅ Completa | Ventana GLFW, Vulkan 1.3 con dynamic rendering, offscreen 320 × 180 con sampler nearest, cuadrícula, picking, gizmos, Inspector. Capas de validación activas en Debug: 0 errores tras redimensionar, minimizar, restaurar y cerrar minimizada. Pool de geometría por páginas de 4 MB con VMA y staging por fotograma (lo usa el terreno). | — |
+| 2 | ✅ Criterio cubierto | UUID v4 por entidad, escena JSON versionada con migraciones y guardado atómico, historial deshacer/rehacer, menús y atajos. Materiales con textura por cara (herramienta B, trazo = una operación, cuentagotas). Pincel de construcción (herramienta C). Cuadrícula infinita. | Prefabs, transform con cuaternión y jerarquía padre/hijo: no bloquean la etapa 3 y se harán cuando el pueblo los necesite. |
+| 3 | ✅ Criterio cubierto | Modelo de componentes y Play sobre una copia. Luau 0.739 en sandbox (VM nueva por Play, destruida en Stop; sin io/debug/loadstring; bibliotecas de solo lectura; 64 MB). Componente Script con parámetros en el Inspector (escena v5), callbacks onStart / onUpdate / onInteract / onMessage / onStop, mensajes entre entidades, entrada de teclado, presupuesto de 1 ms por llamada y 3,5 ms por fotograma con interrupción y desactivación, recarga al guardar conservando la versión anterior si falla. Pestaña Código con pestañas, números de línea, errores en vivo y salto a línea. Ejemplo: `scripts/puerta.luau`. | Resaltado de sintaxis y autocompletado, onTriggerEnter (con la física de la etapa 4), Player ejecutando scripts (etapa 7). |
+| 5 | 🟡 Materiales y estilo | Catálogo `materials.json` con texturas PNG por orientación (lado, arriba, abajo) y tinte; Texture2DArray con mipmaps nearest; UV planas en metros; recarga en caliente. Resolución interna = vista / tamaño del píxel (configurable), pasada de post con contorno de silueta y aristas por profundidad y normales, luz por bandas, reducción de colores con tramado, cámara ajustada a la rejilla de píxeles con desplazamiento de subpíxel. | Paletas por proyecto, niebla, sombra direccional, shaders Slang editables por material. |
+| — | ✅ Extra: terreno de malla | Rejilla de alturas en chunks de 64 × 64 celdas (hasta 1.024²), 4 capas de material mezcladas con tramado anclado a la textura, pinceles elevar / bajar / aplanar / suavizar / pintar con caída suave y deshacer por chunk, remallado incremental y descarte por frustum, guardado en base64 (alturas de 1/64 m). Agua: mar y lagos al generar, pincel de agua, simulación de aguas poco profundas (tuberías virtuales, conserva el volumen, chunks que se duermen al quedarse quietos) en los trazos y en Play, render con profundidad, oleaje, espuma y tramado. | Interacción del agua con cuerpos físicos (flotar, empujar) en la etapa 4; ríos con caudal constante; LOD a distancia; importar mapas de altura en PNG. |
+| — | ✅ Extra: terreno de vóxeles | Terreno de vóxeles: chunks de 32³, greedy meshing, remallado incremental con presupuesto, vértices de 8 bytes, descarte por frustum, generación procedural determinista (ruido fractal con semilla, capas, orilla y agua), pinceles elevar / excavar / pintar / aplanar con deshacer por chunk, guardado en texto RLE por columnas. | Agua transparente, árboles y decoración procedural, LOD para terrenos mayores de 512 × 512. |
+| 4 | ✅ Criterio cubierto | Jolt 5.3 en el hilo principal con paso fijo de 60 Hz y acumulador acotado. Piezas y terrenos (malla y vóxeles, un cuerpo por chunk, rehecho al editarlo) como colisionadores estáticos; Cuerpo físico dinámico, cinemático o zona; flotación en el agua del terreno. Jugador en primera persona (CharacterVirtual: rampas, escalones, salto, nado, empuja cajas). miniaudio: emisores 3D con atenuación lineal, efectos en cola con robo de voz por distancia, sonidos precargados al pulsar Play. Scripts: velocidad, impulsos, sonidos, onTriggerEnter/Exit, onCollision. Escena de prueba `demo_fisica` (`build demo`). | Sombras del jugador, articulaciones, música por zonas, mezclador con buses. |
+| 6, 7 | ⬜ Sin empezar | — | Según la tabla siguiente. |
+
+### Medidas del terreno (equipo de desarrollo, editor en Debug)
+
+| Terreno | Generar | Mallar todo | Peor chunk | Caras tras greedy meshing | Caras sin fusionar | Memoria GPU |
+|---|---|---|---|---|---|---|
+| 128 × 64 × 128 (32 chunks) | 8 ms | 17 ms | 1,3 ms | 4.289 | ~1,5 millones | 0,1 MB |
+| 512 × 128 × 512 (1.024 chunks) | 97 ms | 306 ms | 1,8 ms | 61.118 | ~22 millones | 1,9 MB |
+
+El remallado se reparte entre fotogramas con un presupuesto de 6 ms, así que editar o generar no congela el editor.
 
 | Etapa | Qué se construye | Criterio de aceptación |
 |---|---|---|

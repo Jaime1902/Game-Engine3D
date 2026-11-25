@@ -19,4 +19,9 @@ struct Mesh {
 
 [[nodiscard]] Mesh makePrimitive(Primitive primitive);
 
+// Caras pintables de cada primitiva. Caja: abajo, arriba, frente (-Z), fondo (+Z), izquierda (-X),
+// derecha (+X). Rampa: abajo, pendiente, frente (-Z, la pared alta), lado izquierdo, lado derecho.
+[[nodiscard]] std::uint32_t faceCount(Primitive primitive) noexcept;
+[[nodiscard]] const char* faceName(Primitive primitive, std::uint32_t face) noexcept;
+
 }

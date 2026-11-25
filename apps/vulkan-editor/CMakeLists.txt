@@ -19,24 +19,48 @@ add_library(ge3d_editor_widgets STATIC
 )
 target_include_directories(ge3d_editor_widgets SYSTEM PUBLIC "${imgui_SOURCE_DIR}" "${imguizmo_SOURCE_DIR}/src")
 target_link_libraries(ge3d_editor_widgets PRIVATE Vulkan::Vulkan glfw)
-target_link_libraries(ge3d_vulkan_editor PRIVATE ge3d::runtime ge3d_editor_widgets Vulkan::Vulkan glfw GPUOpen::VulkanMemoryAllocator)
+target_link_libraries(ge3d_vulkan_editor PRIVATE ge3d::runtime ge3d::scripting ge3d::physics ge3d::audio ge3d_editor_widgets Vulkan::Vulkan glfw GPUOpen::VulkanMemoryAllocator)
 target_include_directories(ge3d_vulkan_editor SYSTEM PRIVATE "${glm_SOURCE_DIR}")
-target_sources(ge3d_vulkan_editor PRIVATE vma.cpp EditorView.cpp)
+target_sources(ge3d_vulkan_editor PRIVATE vma.cpp EditorView.cpp EditorLog.cpp MaterialTextures.cpp TerrainRenderer.cpp EditorScripts.cpp EditorPlay.cpp)
+# vma.cpp solo compila la implementación de VulkanMemoryAllocator (código externo).
+if(NOT MSVC)
+    set_source_files_properties(vma.cpp PROPERTIES COMPILE_OPTIONS "-w")
+endif()
 
 find_program(GE3D_SLANGC NAMES slangc HINTS "$ENV{VULKAN_SDK}/Bin" REQUIRED)
 set(GE3D_SHADER_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/shaders")
 file(MAKE_DIRECTORY "${GE3D_SHADER_OUTPUT_DIR}")
-foreach(stage vertex fragment)
+# Puntos de entrada de los shaders: archivo .slang, nombre de salida, función y etapa.
+# Cada uno se compila a <archivo>.<nombre>.spv.
+set(GE3D_SHADER_ENTRIES
+    "scene|vertex|vertexMain|vertex"
+    "scene|voxel|voxelVertexMain|vertex"
+    "scene|height|heightVertexMain|vertex"
+    "scene|water|waterVertexMain|vertex"
+    "scene|fragment|fragmentMain|fragment"
+    "post|vertex|postVertexMain|vertex"
+    "post|fragment|postFragmentMain|fragment"
+)
+foreach(entry IN LISTS GE3D_SHADER_ENTRIES)
+    string(REPLACE "|" ";" parts "${entry}")
+    list(GET parts 0 file)
+    list(GET parts 1 name)
+    list(GET parts 2 function)
+    list(GET parts 3 stage)
     add_custom_command(
-        OUTPUT "${GE3D_SHADER_OUTPUT_DIR}/scene.${stage}.spv"
-        COMMAND "${GE3D_SLANGC}" "${CMAKE_CURRENT_SOURCE_DIR}/shaders/scene.slang"
-            -entry ${stage}Main -stage ${stage} -target spirv -matrix-layout-column-major
-            -o "${GE3D_SHADER_OUTPUT_DIR}/scene.${stage}.spv"
-        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/scene.slang"
+        OUTPUT "${GE3D_SHADER_OUTPUT_DIR}/${file}.${name}.spv"
+        COMMAND "${GE3D_SLANGC}" "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${file}.slang"
+            -entry ${function} -stage ${stage} -target spirv -matrix-layout-column-major
+            -o "${GE3D_SHADER_OUTPUT_DIR}/${file}.${name}.spv"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${file}.slang"
         VERBATIM
     )
-    list(APPEND GE3D_SHADER_BINARIES "${GE3D_SHADER_OUTPUT_DIR}/scene.${stage}.spv")
+    list(APPEND GE3D_SHADER_BINARIES "${GE3D_SHADER_OUTPUT_DIR}/${file}.${name}.spv")
 endforeach()
 add_custom_target(ge3d_vulkan_shaders DEPENDS ${GE3D_SHADER_BINARIES})
 add_dependencies(ge3d_vulkan_editor ge3d_vulkan_shaders)
-target_compile_definitions(ge3d_vulkan_editor PRIVATE GE3D_SHADER_DIR="${GE3D_SHADER_OUTPUT_DIR}")
+target_compile_definitions(ge3d_vulkan_editor PRIVATE
+    GE3D_SHADER_DIR="${GE3D_SHADER_OUTPUT_DIR}"
+    GE3D_DEFAULT_SCENE="${PROJECT_SOURCE_DIR}/projects/pueblo/Content/scenes/main.scene.json"
+    GE3D_CONTENT_DIR="${PROJECT_SOURCE_DIR}/projects/pueblo/Content"
+)
