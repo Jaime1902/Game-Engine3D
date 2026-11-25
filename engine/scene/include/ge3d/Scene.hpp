@@ -4,11 +4,13 @@
 #include "ge3d/Uuid.hpp"
 #include "ge3d/Voxel.hpp"
 #include <array>
+#include <map>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
+#include <variant>
 #include <vector>
 
 namespace ge3d {
@@ -74,6 +76,20 @@ struct HeightmapComponent {
 
 [[nodiscard]] HeightmapComponent makeHeightmap(const HeightmapSettings& settings = {});
 
+// Comportamiento programado en Luau. El script vive en Content (p. ej. "scripts/puerta.luau") y declara
+// sus parámetros con valores por defecto; aquí se guardan los valores elegidos en el Inspector.
+using ScriptValue = std::variant<double, bool, std::string>;
+
+struct ScriptComponent {
+    std::string path;
+    bool enabled{true};
+    std::map<std::string, ScriptValue> parameters;
+    friend bool operator==(const ScriptComponent&, const ScriptComponent&) = default;
+};
+
+// Ruta de script válida: relativa, sin "..", con extensión .luau.
+[[nodiscard]] bool isValidScriptPath(const std::string& path);
+
 struct Entity {
     EntityId id{};
     Uuid uuid{};
@@ -82,6 +98,7 @@ struct Entity {
     std::optional<ShapeComponent> shape;
     std::optional<TerrainComponent> terrain;
     std::optional<HeightmapComponent> heightmap;
+    std::optional<ScriptComponent> script;
     friend bool operator==(const Entity&, const Entity&) = default;
 };
 

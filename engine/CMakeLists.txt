@@ -49,3 +49,34 @@ set_source_files_properties(terrain/src/Voxel.cpp terrain/src/Heightmap.cpp PROP
 # Image.cpp solo contiene la implementación de stb (código externo): sin avisos.
 set_source_files_properties(assets/src/Image.cpp PROPERTIES
     COMPILE_OPTIONS "$<IF:$<CXX_COMPILER_ID:MSVC>,/W0,-w>")
+
+# --- Scripts: Luau 0.739 (MIT), fijado por tag. Solo la VM y el compilador; sin CLI ni pruebas. ---
+set(LUAU_BUILD_CLI OFF CACHE INTERNAL "")
+set(LUAU_BUILD_TESTS OFF CACHE INTERNAL "")
+set(LUAU_BUILD_WEB OFF CACHE INTERNAL "")
+FetchContent_Declare(luau
+    GIT_REPOSITORY https://github.com/luau-lang/luau.git
+    GIT_TAG 0.739
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(luau)
+# Código externo: con MinGW, Luau avisa de un atributo de visibilidad que no existe en Windows.
+# Las demás bibliotecas de Luau (análisis de tipos, CodeGen, CLI...) no se compilan salvo que algo las use.
+foreach(luau_target IN ITEMS Luau.VM Luau.Compiler Luau.Ast Luau.Common Luau.Bytecode Luau.Analysis Luau.CodeGen
+                             Luau.Config Luau.Require Luau.RequireNavigator Luau.CLI.lib Luau.EqSat Luau.Inliner)
+    if(TARGET ${luau_target})
+        get_target_property(luau_type ${luau_target} TYPE)
+        if(NOT luau_type STREQUAL "INTERFACE_LIBRARY")
+            set_target_properties(${luau_target} PROPERTIES EXCLUDE_FROM_ALL TRUE)
+            if(NOT MSVC)
+                target_compile_options(${luau_target} PRIVATE -w)
+            endif()
+        endif()
+    endif()
+endforeach()
+
+# Biblioteca de scripts aparte: Luau no aparece en los headers de escena ni en el resto del runtime.
+add_library(ge3d_scripting STATIC scripting/src/ScriptHost.cpp)
+add_library(ge3d::scripting ALIAS ge3d_scripting)
+target_include_directories(ge3d_scripting PUBLIC scripting/include)
+target_link_libraries(ge3d_scripting PUBLIC ge3d::runtime PRIVATE Luau.VM Luau.Compiler ge3d_options)

@@ -16,8 +16,9 @@ namespace ge3d {
 //   3  Componentes: "transform", "shape" { primitive, materials[6] } y "terrain" { chunks, voxelSize,
 //      generator, data }. Las caras usan ids de material del catálogo en lugar de colores.
 //   4  "heightmap" { chunks [x, z], cellSize, layers[4], generator, data }: terreno de malla.
+//   5  "script" { path, enabled, params { nombre: número | booleano | texto } }: comportamiento en Luau.
 // Al leer una versión anterior se migra en memoria; al guardar siempre se escribe la actual.
-inline constexpr int sceneFormatVersion = 4;
+inline constexpr int sceneFormatVersion = 5;
 
 // El contenido no es una escena válida. La escena abierta no debe sustituirse.
 class SceneFormatError : public std::runtime_error {

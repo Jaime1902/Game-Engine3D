@@ -25,6 +25,12 @@ TerrainComponent makeTerrain(const TerrainSettings& settings) {
     return {settings, generateTerrain(settings)};
 }
 
+bool isValidScriptPath(const std::string& path) {
+    const auto dot = path.rfind('.');
+    return !path.empty() && path.size() < 260 && path.find("..") == std::string::npos && path.front() != '/' &&
+           path.front() != '\\' && path.find(':') == std::string::npos && dot != std::string::npos && path.substr(dot) == ".luau";
+}
+
 HeightmapComponent makeHeightmap(const HeightmapSettings& settings) {
     return {settings, generateHeightmap(settings)};
 }

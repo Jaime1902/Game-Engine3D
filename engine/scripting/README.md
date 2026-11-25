@@ -1,5 +1,19 @@
 # Luau embebido y edición de código
 
+## Estado actual
+
+`ge3d_scripting` (engine/scripting) contiene `ScriptHost` y `describeScript`. Los headers no exponen tipos de Luau.
+
+- **Formato**: un script devuelve una tabla; `params` declara los parámetros (número, booleano o texto) con su valor por defecto y las funciones `onStart(self)`, `onUpdate(self, dt)`, `onInteract(self)`, `onMessage(self, evento, valor, origen)` y `onStop(self)` son los callbacks. El cuerpo del script se ejecuta una vez por VM; cada entidad recibe su propio `self` con los parámetros y `self.entity`.
+- **API**: `Entity` (userdata con `position`, `rotation`, `scale` como `vector`, `name`, `id`, `send`), `scene.find`, `scene.send`, `scene.time`, `input.isDown`, `input.wasPressed`, `log`/`print`. Una entidad eliminada produce un error claro al usarla.
+- **Sandbox**: `luaL_sandbox` (bibliotecas y globales de solo lectura) y `luaL_sandboxthread` por script; sin `debug`, `loadstring`, `getfenv`/`setfenv`; Luau no trae `io` ni `os.execute`. Memoria limitada a 64 MB con un asignador propio.
+- **Presupuesto**: interrupción de la VM (`lua_callbacks()->interrupt`) a 1 ms por llamada; 3,5 ms por fotograma para todos (lo que no cabe sigue en el siguiente fotograma, en turno rotatorio). Un error o un exceso desactiva la instancia y su `ScriptComponent` en la copia de Play y se informa con la traza.
+- **Recarga**: si compila y el cuerpo se ejecuta bien, las instancias se recrean con estado nuevo y los mismos parámetros; si no, se conserva la versión anterior.
+- **Editor**: pestaña Código (documentos en pestañas, números de línea, comprobación al dejar de escribir, lista de errores con salto a línea, Ctrl+S), componente Script en el Inspector, clic en Play = `onInteract`, cambios de parámetros en Play aplicados en vivo.
+- **Pruebas**: `tests/script_tests.cpp` (parámetros, puerta, bucle infinito, sandbox, mensajes, errores con línea, recarga, guardado).
+
+Pendiente: resaltado de sintaxis, autocompletado desde la API, `onTriggerEnter` con física, ejecución en Player.
+
 ## Autoría y API
 
 Un ScriptComponent guarda UUID del archivo, estado habilitado y parámetros serializables. Cada instancia tiene su estado. Un descriptor de script define campos de Inspector con tipo y valor por defecto. La API del motor ofrece handles con generación, acciones de entrada, consultas de física, audio, temporizadores y creación de entidades por prefab.

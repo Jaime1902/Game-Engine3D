@@ -322,6 +322,19 @@ std::string serializeScene(const Scene& scene) {
         }
         if (entity.terrain) item["terrain"] = terrainJson(entity);
         if (entity.heightmap) item["heightmap"] = heightmapJson(entity);
+        if (entity.script) {
+            Json params = Json::object();
+            for (const auto& [name, value] : entity.script->parameters) {
+                if (const auto* number = std::get_if<double>(&value)) params[name] = *number;
+                else if (const auto* flag = std::get_if<bool>(&value)) params[name] = *flag;
+                else params[name] = std::get<std::string>(value);
+            }
+            Json script = Json::object();
+            script["path"] = entity.script->path;
+            script["enabled"] = entity.script->enabled;
+            script["params"] = std::move(params);
+            item["script"] = std::move(script);
+        }
         entities.push_back(std::move(item));
     }
     Json root = Json::object();
@@ -421,6 +434,26 @@ Scene parseSceneData(std::string_view text, bool generateTerrains) {
                 // Sin archivo, los vóxeles se generan con la configuración; loadSceneFile lee los guardados.
                 const auto settings = readTerrainSettings(terrainJson, terrainAt);
                 entity.terrain = generateTerrains ? makeTerrain(settings) : TerrainComponent{settings, nullptr};
+            }
+            if (number >= 5 && item.contains("script")) {
+                const auto& scriptJson = item["script"];
+                const std::string scriptAt = at + " (script)";
+                if (!scriptJson.is_object()) fail(scriptAt + ": debe ser un objeto");
+                ScriptComponent script;
+                script.path = readString(scriptJson, "path", scriptAt);
+                if (!isValidScriptPath(script.path)) fail(scriptAt + ": ruta de script invalida \"" + script.path + "\"");
+                const auto& enabled = member(scriptJson, "enabled", scriptAt);
+                if (!enabled.is_boolean()) fail(scriptAt + ": \"enabled\" debe ser true o false");
+                script.enabled = enabled.get<bool>();
+                const auto& params = member(scriptJson, "params", scriptAt);
+                if (!params.is_object()) fail(scriptAt + ": \"params\" debe ser un objeto");
+                for (const auto& [name, value] : params.items()) {
+                    if (value.is_boolean()) script.parameters[name] = value.get<bool>();
+                    else if (value.is_number() && std::isfinite(value.get<double>())) script.parameters[name] = value.get<double>();
+                    else if (value.is_string()) script.parameters[name] = value.get<std::string>();
+                    else fail(scriptAt + ": el parametro \"" + name + "\" debe ser numero, booleano o texto");
+                }
+                entity.script = std::move(script);
             }
             if (number >= 4 && item.contains("heightmap")) {
                 const auto& heightmapItem = item["heightmap"];

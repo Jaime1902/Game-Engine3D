@@ -3,12 +3,14 @@
 #include "ge3d/History.hpp"
 #include "ge3d/Materials.hpp"
 #include "ge3d/Scene.hpp"
+#include "ge3d/ScriptHost.hpp"
 #include <glm/glm.hpp>
 #include <imgui.h>
 
 #include <cstdint>
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -47,6 +49,7 @@ public:
     };
 
     explicit EditorView(float uiScale = 1.0f);
+    ~EditorView();
     void draw(ImTextureID sceneTexture);
     [[nodiscard]] SceneView sceneView() const;
     [[nodiscard]] glm::vec3 cameraPosition() const;
@@ -160,6 +163,35 @@ private:
     [[nodiscard]] const char* materialName(const ge3d::MaterialId& material) const;
     void focusSelection();
     void setViewFromMatrix(const glm::mat4& view);
+
+    // Scripts (EditorScripts.cpp): pestaña Código, componente Script y ejecución en Play.
+    struct CodeDocument {
+        std::string path;
+        std::string text;
+        std::string saved;
+        std::vector<ge3d::ScriptDiagnostic> diagnostics;
+        double editedAt = -1.0;       // última edición sin comprobar (se compila al pararse de escribir)
+        int jumpLine = 0;             // línea a la que llevar el cursor
+        int cursorLine = 0;
+        bool scrollToCursor = false;
+        [[nodiscard]] bool dirty() const { return text != saved; }
+    };
+    struct ScriptCacheEntry {
+        std::filesystem::file_time_type time;
+        ge3d::ScriptInfo info;
+    };
+    void drawCode();
+    void drawCodeDocument(CodeDocument& document);
+    void drawScriptApi();
+    void openScript(const std::string& path, int line = 0);
+    bool saveScript(CodeDocument& document);
+    void createScript(const std::string& name);
+    [[nodiscard]] const ge3d::ScriptInfo* scriptInfo(const std::string& path);
+    void watchScripts(bool force = false);
+    void drawScriptComponent(ge3d::Entity& entity, const ge3d::Entity& frameStart);
+    [[nodiscard]] ge3d::ScriptInput gatherInput() const;
+    [[nodiscard]] std::optional<std::string> readScript(const std::string& path) const;
+    [[nodiscard]] std::filesystem::path scriptFile(const std::string& path) const;
 
     // Paneles
     void drawMenuBar();
@@ -285,6 +317,20 @@ private:
     bool showInspector_ = true;
     bool showProject_ = true;
     bool showConsole_ = true;
+    bool showCode_ = true;
+    int focusSceneFrames_ = 0;
+    bool codeFocused_ = false;                    // Ctrl+S guarda el script, no la escena                    // fotogramas en los que traer la Escena al frente
+
+    std::unique_ptr<ge3d::ScriptHost> scripts_;
+    std::vector<CodeDocument> documents_;
+    int selectDocument_ = -1;                     // pestaña a seleccionar en el siguiente fotograma
+    int closingDocument_ = -1;                    // pestaña con cambios que se pidió cerrar
+    std::map<std::string, ScriptCacheEntry> scriptCache_;
+    std::map<std::string, std::filesystem::file_time_type> scriptTimes_;
+    std::vector<std::string> scriptList_;
+    double lastScriptWatch_ = -10.0;
+    ImFont* codeFont_ = nullptr;
+    char newScriptName_[64]{};
     bool showInfo_ = true;
     bool showWarnings_ = true;
     bool showErrors_ = true;

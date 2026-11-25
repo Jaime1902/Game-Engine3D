@@ -115,15 +115,18 @@ void applyTheme(float scale) {
     style.ScaleAllSizes(scale);
 }
 
-ImFont* loadFonts(float scale, ImFont*& bold) {
+ImFont* loadFonts(float scale, ImFont*& bold, ImFont*& code) {
     ImGuiIO& io = ImGui::GetIO();
     bold = nullptr;
+    code = nullptr;
     std::error_code error;
     const char* regular = "C:/Windows/Fonts/segoeui.ttf";
     const char* semibold = "C:/Windows/Fonts/seguisb.ttf";
     if (!std::filesystem::exists(regular, error)) return nullptr;
     ImFont* font = io.Fonts->AddFontFromFileTTF(regular, std::round(15.0f * scale));
     if (std::filesystem::exists(semibold, error)) bold = io.Fonts->AddFontFromFileTTF(semibold, std::round(15.0f * scale));
+    const char* mono = "C:/Windows/Fonts/consola.ttf";
+    if (std::filesystem::exists(mono, error)) code = io.Fonts->AddFontFromFileTTF(mono, std::round(14.0f * scale));
     return font;
 }
 
@@ -369,10 +372,17 @@ bool isSceneFile(const std::filesystem::path& path) {
 
 EditorView::EditorView(float uiScale) : scale_(std::clamp(uiScale, 0.75f, 3.0f)) {
     applyTheme(scale_);
-    loadFonts(scale_, boldFont_);
+    loadFonts(scale_, boldFont_, codeFont_);
 
     scenePath_ = ge3d::pathFromUtf8(GE3D_DEFAULT_SCENE);
     contentRoot_ = ge3d::pathFromUtf8(GE3D_CONTENT_DIR);
+    // Scripts: se leen de Content y escriben en la Consola. La VM solo existe durante Play.
+    scripts_ = std::make_unique<ge3d::ScriptHost>(
+        [this](const std::string& path) { return readScript(path); },
+        [](bool error, const std::string& message) {
+            editorLog().add(error ? LogLevel::error : LogLevel::info, message);
+        });
+    watchScripts(true);
     std::error_code error;
     if (std::filesystem::exists(scenePath_, error)) {
         loadScene();
@@ -380,6 +390,10 @@ EditorView::EditorView(float uiScale) : scale_(std::clamp(uiScale, 0.75f, 3.0f))
         log("Escena de ejemplo sin guardar. Pulsa Ctrl+S para guardarla en " + ge3d::pathToUtf8(scenePath_));
     }
     refreshProject();
+}
+
+EditorView::~EditorView() {
+    if (scripts_ && scripts_->running()) scripts_->stop(scene_);
 }
 
 std::string EditorView::windowTitle() const {
@@ -1639,7 +1653,12 @@ void EditorView::togglePlay() {
             if (entity.heightmap && entity.heightmap->data) waterSimulation(entity.id).wakeAll(*entity.heightmap->data);
         }
         log("Play: los cambios que hagas ahora se descartan al detener");
+        // Scripts: VM nueva para esta copia. Haz clic en un objeto con script para interactuar.
+        scripts_->start(scene_);
+        ImGui::SetWindowFocus("Escena");
     } else {
+        // onStop y destrucción de la VM antes de recuperar la escena: nada de Play sobrevive.
+        scripts_->stop(scene_);
         scene_ = std::move(*playSnapshot_);
         playSnapshot_.reset();
         water_.clear();
@@ -1660,6 +1679,7 @@ void EditorView::togglePause() {
 void EditorView::step() {
     if (isPlaying() && paused_) {
         ++playFrames_;
+        scripts_->update(scene_, 1.0f / 60.0f, gatherInput());
         simulateWater(1.0f / 60.0f);
     }
 }
@@ -1776,7 +1796,7 @@ void EditorView::handleShortcuts() {
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_Z, repeat)) undo();
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_Y, repeat) ||
         ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Z, repeat)) redo();
-    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_S, once)) saveScene();
+    if (!codeFocused_ && ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_S, once)) saveScene();
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_N, once)) requestSceneChange(SceneChange::newScene);
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_O, once)) pathPopup_ = PathPopup::open;
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_D, once)) duplicateSelection();
@@ -1784,7 +1804,7 @@ void EditorView::handleShortcuts() {
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_P, once)) togglePause();
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiMod_Alt | ImGuiKey_P, once)) step();
     if (ImGui::Shortcut(ImGuiKey_Delete, once)) deleteSelection();
-    if (!orbiting_ && !panning_) {
+    if (!orbiting_ && !panning_ && !(isPlaying() && !paused_)) {
         if (ImGui::Shortcut(ImGuiKey_Q, once)) tool_ = Tool::hand;
         if (ImGui::Shortcut(ImGuiKey_W, once)) tool_ = Tool::move;
         if (ImGui::Shortcut(ImGuiKey_E, once)) tool_ = Tool::rotate;
@@ -1852,9 +1872,10 @@ void EditorView::drawMenuBar() {
         ImGui::MenuItem("Inspector", nullptr, &showInspector_);
         ImGui::MenuItem("Proyecto", nullptr, &showProject_);
         ImGui::MenuItem("Consola", nullptr, &showConsole_);
+        ImGui::MenuItem("Codigo", nullptr, &showCode_);
         ImGui::Separator();
         if (ImGui::MenuItem("Restablecer distribucion")) {
-            showHierarchy_ = showInspector_ = showProject_ = showConsole_ = true;
+            showHierarchy_ = showInspector_ = showProject_ = showConsole_ = showCode_ = true;
             layoutCreated_ = false;
         }
         ImGui::EndMenu();
@@ -2170,7 +2191,7 @@ void EditorView::drawInspector() {
         }
 
         // Los componentes se quitan con clic derecho en su cabecera.
-        enum class Removal { none, shape, terrain, heightmap };
+        enum class Removal { none, shape, terrain, heightmap, script };
         Removal removal = Removal::none;
         const auto removeMenu = [&](const char* id, Removal kind) {
             if (ImGui::BeginPopupContextItem(id)) {
@@ -2246,11 +2267,20 @@ void EditorView::drawInspector() {
             ImGui::Spacing();
         }
 
+        // Componente Script: comportamiento en Luau con sus parámetros.
+        if (entity->script) {
+            const bool open = componentHeader("Script", boldFont_);
+            removeMenu("script_menu", Removal::script);
+            if (open) drawScriptComponent(*entity, frameStart);
+            ImGui::Spacing();
+        }
+
         if (removal != Removal::none) {
             std::optional<ge3d::Entity> before = frameStart;
             if (removal == Removal::shape) entity->shape.reset();
             if (removal == Removal::terrain) entity->terrain.reset();
             if (removal == Removal::heightmap) entity->heightmap.reset();
+            if (removal == Removal::script) entity->script.reset();
             commitModification(before, "Quitar componente");
         }
 
@@ -2278,8 +2308,23 @@ void EditorView::drawInspector() {
                 entity->terrain = ge3d::makeTerrain(newTerrain_);
                 added = true;
             }
+            if (ImGui::BeginMenu("Script", !entity->script)) {
+                for (const auto& path : scriptList_) {
+                    if (ImGui::MenuItem(path.c_str())) {
+                        entity->script = ge3d::ScriptComponent{path, true, {}};
+                        added = true;
+                    }
+                }
+                if (scriptList_.empty()) ImGui::TextDisabled("No hay scripts en Content/scripts");
+                ImGui::Separator();
+                if (ImGui::MenuItem("Nuevo script...")) {
+                    showCode_ = true;
+                    ImGui::SetWindowFocus("Codigo");
+                    log("Crea el script con \"+ Nuevo script\" en la pestana Codigo y luego elige el en el Inspector");
+                }
+                ImGui::EndMenu();
+            }
             ImGui::Separator();
-            ImGui::MenuItem("Script (etapa 3)", nullptr, false, false);
             ImGui::MenuItem("Cuerpo fisico (etapa 4)", nullptr, false, false);
             ImGui::MenuItem("Fuente de audio (etapa 4)", nullptr, false, false);
             if (added) commitModification(before, "Agregar componente");
@@ -2579,7 +2624,12 @@ void EditorView::drawViewport(ImTextureID sceneTexture) {
             draw->ChannelsMerge();
 
             const bool selectTool = tool_ == Tool::move || tool_ == Tool::rotate || tool_ == Tool::scale;
-            if (canUseMouse && selectTool && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            bool interacted = false;
+            if (canUseMouse && isPlaying() && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                // En Play, el clic sobre un objeto con script llama a su onInteract.
+                if (const auto hit = raycast(io.MousePos, origin, size)) interacted = scripts_->interact(scene_, hit->entity);
+            }
+            if (!interacted && canUseMouse && selectTool && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                 ImGui::SetWindowFocus();
                 pick(io.MousePos, origin, size);
             }
@@ -2723,14 +2773,19 @@ void EditorView::buildDefaultLayout(ImGuiID dock) {
     ImGui::DockBuilderDockWindow("Consola", bottom);
     ImGui::DockBuilderDockWindow("Jerarquia", left);
     ImGui::DockBuilderDockWindow("Escena", center);
+    ImGui::DockBuilderDockWindow("Codigo", center);
     ImGui::DockBuilderFinish(dock);
+    focusSceneFrames_ = 2;
 }
 
 void EditorView::draw(ImTextureID sceneTexture) {
     if (isPlaying() && !paused_) {
         ++playFrames_;
-        simulateWater(std::min(ImGui::GetIO().DeltaTime, 1.0f / 20.0f));
+        const float dt = std::min(ImGui::GetIO().DeltaTime, 1.0f / 20.0f);
+        scripts_->update(scene_, dt, gatherInput());
+        simulateWater(dt);
     }
+    watchScripts();
 
     // En modo Play todo el editor se tiñe para que no se confunda con la edición normal.
     const int tinted = isPlaying() ? 3 : 0;
@@ -2756,6 +2811,12 @@ void EditorView::draw(ImTextureID sceneTexture) {
     drawInspector();
     drawProject();
     drawConsole();
+    drawCode();
+    if (focusSceneFrames_ > 0) {
+        // Escena y Código comparten el centro: al montar la distribución se muestra la Escena.
+        --focusSceneFrames_;
+        ImGui::SetWindowFocus("Escena");
+    }
 
     drawPathPopup();
     drawUnsavedPopup();

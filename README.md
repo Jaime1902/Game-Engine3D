@@ -4,7 +4,7 @@ Motor de escritorio para construir, programar y jugar escenas 3D pixel art desde
 
 ## Estado del repositorio
 
-El runtime C++ organiza cada objeto en componentes (Transformación, Forma, Terreno y Terreno de vóxeles), genera y malla terrenos de malla y de vóxeles, carga materiales con texturas PNG, guarda y abre escenas en JSON y lleva un historial de deshacer y rehacer. El editor Vulkan tiene la distribución clásica de un editor de escenas: Jerarquía, Escena, Inspector, Proyecto y Consola, con barra de herramientas y modo Play. El jugador de consola permite comprobar el arranque del runtime. Los scripts Luau, la física y el audio corresponden a etapas posteriores. El avance por etapas está en [docs/roadmap.md](docs/roadmap.md).
+El runtime C++ organiza cada objeto en componentes (Transformación, Forma, Terreno y Terreno de vóxeles), genera y malla terrenos de malla y de vóxeles, carga materiales con texturas PNG, guarda y abre escenas en JSON y lleva un historial de deshacer y rehacer. El editor Vulkan tiene la distribución clásica de un editor de escenas: Jerarquía, Escena, Inspector, Proyecto y Consola, con barra de herramientas y modo Play. El jugador de consola permite comprobar el arranque del runtime. Los objetos se programan con scripts Luau desde la pestaña Código y se prueban en Play. La física y el audio corresponden a la etapa 4. El avance por etapas está en [docs/roadmap.md](docs/roadmap.md).
 
 ## Compilación
 
@@ -35,7 +35,8 @@ El editor requiere una GPU con Vulkan 1.3, dynamic rendering y synchronization2.
 | **Escena** (centro) | Vista pixel art (ver *Estilo pixel art*). Cubo de orientación arriba a la derecha: clic en una cara para alinear la cámara. El mundo no tiene bordes: la cuadrícula sigue a la cámara, pasa a líneas cada 10 m o 100 m al alejarse y se desvanece con tramado |
 | **Inspector** (derecha) | Nombre y componentes del objeto: Transformación, Forma (primitiva y material de cada cara), Terreno (capas, generador y tamaño) y Terreno de vóxeles. **Agregar componente** los añade; clic derecho en la cabecera de un componente lo quita |
 | **Proyecto** (abajo) | Archivos de `projects/pueblo/Content`. Doble clic en una escena para abrirla |
-| **Consola** (abajo) | Mensajes del editor y de Vulkan, con filtros por tipo |
+| **Consola** (abajo) | Mensajes del editor, de Vulkan y de los scripts, con filtros por tipo |
+| **Código** (junto a Escena) | Scripts Luau de `Content/scripts`: pestañas, números de línea, errores en vivo y **Guardar** (Ctrl+S) |
 
 La barra superior tiene las herramientas **Mano (Q)**, **Mover (W)**, **Rotar (E)**, **Escalar (R)**, **Pintar (B)**, **Construir (C)** y **Terreno (T)**, el cambio de ejes Global o Local y **Ajuste**, que mueve en pasos de 0,25 y rota en pasos de 15°. En el centro están **Play**, **Pausa** y **Paso**: en Play el editor se tiñe de azul y al detener se descartan los cambios hechos durante el juego.
 
@@ -68,6 +69,31 @@ Las caras y los vóxeles no guardan colores sino **materiales**, definidos en `p
 - Todas las texturas son PNG cuadrados del mismo tamaño y potencia de dos (el juego inicial es de 16 × 16). Se dibujan con filtro nearest y se repiten **una vez por metro**, así que un muro estirado mantiene el tamaño de sus píxeles.
 - Al guardar `materials.json` o cualquier PNG, el editor recarga las texturas solo (en menos de un segundo). Un id desconocido o un PNG que no carga se ve con cuadros magenta y aparece un aviso en la Consola.
 - `ge3d_texture_gen <carpeta Content>` regenera el juego de texturas inicial (no sobrescribe archivos existentes salvo con `--force`).
+
+### Scripts (Luau)
+
+Un script es un archivo `.luau` en `projects/pueblo/Content/scripts` que devuelve una tabla con sus parámetros y callbacks. El de ejemplo es la puerta:
+
+```lua
+local Puerta = {}
+Puerta.params = { velocidad = 90, angulo = 90, abierta = false }   -- aparecen en el Inspector
+
+function Puerta.onInteract(self)          -- clic sobre la entidad en Play
+	self.abierta = not self.abierta
+end
+
+function Puerta.onUpdate(self, dt)        -- cada fotograma
+	-- gira self.entity.rotation hacia el ángulo objetivo a self.velocidad grados por segundo
+end
+
+return Puerta
+```
+
+1. En la pestaña **Código**, **+ Nuevo script** crea uno con una plantilla (o abre `puerta.luau`). Los errores aparecen mientras escribes, con la línea marcada en rojo; clic en un error lleva a su línea.
+2. Selecciona un objeto, **Agregar componente → Script** y elige el script. El Inspector muestra sus parámetros; cada objeto puede tener valores distintos (la **x** vuelve al valor del script).
+3. Pulsa **Play** y haz clic en el objeto. Si guardas el script durante Play se recarga al momento; si tiene errores sigue funcionando la versión anterior. Al detener, todo vuelve como estaba.
+
+API: `self.entity` (position, rotation, scale como `vector`, name, `send`), `scene.find(nombre)`, `scene.send(nombre, evento, valor)`, `scene.time()`, `input.isDown("E")` / `input.wasPressed("Space")`, `log(...)`; callbacks `onStart`, `onUpdate`, `onInteract`, `onMessage`, `onStop`. El botón **API** de la pestaña Código tiene la referencia completa. Los scripts no tienen acceso a archivos ni al sistema; cada llamada tiene 1 ms y todos juntos 3,5 ms por fotograma: un bucle sin fin se interrumpe, se informa en la Consola con su traza y ese script se desactiva hasta detener Play.
 
 ### Estilo pixel art
 
