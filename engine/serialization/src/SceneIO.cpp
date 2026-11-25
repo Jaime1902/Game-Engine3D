@@ -89,6 +89,9 @@ std::string serializeScene(const Scene& scene) {
         item["position"] = vector(entity.transform.position);
         item["rotationDegrees"] = vector(entity.transform.rotationDegrees);
         item["scale"] = vector(entity.transform.scale);
+        Json faces = Json::array();
+        for (const auto face : entity.faces) faces.push_back(static_cast<int>(face));
+        item["faces"] = std::move(faces);
         entities.push_back(std::move(item));
     }
     Json root = Json::object();
@@ -113,7 +116,8 @@ Scene parseScene(std::string_view text) {
         fail("La escena usa la version " + std::to_string(number) + " del formato y este editor solo entiende hasta la " +
              std::to_string(sceneFormatVersion));
     }
-    // Aquí irán las migraciones cuando exista una versión 2 del formato.
+    // Migraciones: una escena v1 no tiene "faces" y recibe los colores por defecto de su primitiva.
+    const bool hasFaces = number >= 2;
 
     const auto& entities = member(root, "entities", where);
     if (!entities.is_array()) fail("Escena: \"entities\" debe ser una lista");
@@ -142,6 +146,23 @@ Scene parseScene(std::string_view text) {
         entity.transform.scale = readVector(item, "scale", at);
         const auto& scale = entity.transform.scale;
         if (scale.x <= 0 || scale.y <= 0 || scale.z <= 0) fail(at + ": la escala debe ser mayor que cero");
+
+        entity.faces = defaultFaceColors(entity.primitive);
+        if (hasFaces) {
+            const auto& faces = member(item, "faces", at);
+            if (!faces.is_array() || faces.size() != maxFaces) {
+                fail(at + ": \"faces\" debe ser una lista de " + std::to_string(maxFaces) + " colores");
+            }
+            for (std::size_t face = 0; face < maxFaces; ++face) {
+                const auto& value = faces[face];
+                if (!value.is_number_integer() || value.get<long long>() < 0 ||
+                    value.get<long long>() >= static_cast<long long>(paletteSize)) {
+                    fail(at + ": \"faces\" contiene un color fuera de la paleta (0 a " +
+                         std::to_string(paletteSize - 1) + ")");
+                }
+                entity.faces[face] = static_cast<PaletteIndex>(value.get<long long>());
+            }
+        }
 
         scene.add(std::move(entity));
     }

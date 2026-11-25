@@ -13,6 +13,7 @@ Entity Scene::makeEntity(std::string name, Primitive primitive, Transform transf
     entity.name = std::move(name);
     entity.primitive = primitive;
     entity.transform = transform;
+    entity.faces = defaultFaceColors(primitive);
     return entity;
 }
 

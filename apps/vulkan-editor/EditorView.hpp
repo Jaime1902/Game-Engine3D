@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -36,7 +37,12 @@ public:
     static glm::mat4 modelMatrix(const ge3d::Transform& transform);
 
 private:
-    enum class Tool { hand, move, rotate, scale };
+    enum class Tool { hand, move, rotate, scale, paint };
+    struct Hit {
+        ge3d::EntityId entity{};
+        std::uint32_t face{};
+        float distance{};
+    };
     enum class SceneChange { none, newScene, open, reload, quit };
     enum class PathPopup { none, open, saveAs };
 
@@ -49,7 +55,11 @@ private:
 
     [[nodiscard]] glm::mat4 view() const;
     [[nodiscard]] glm::mat4 projection() const;
+    [[nodiscard]] std::optional<Hit> raycast(ImVec2 mouse, ImVec2 origin, ImVec2 size) const;
     void pick(ImVec2 mouse, ImVec2 origin, ImVec2 size);
+    void drawFacePreview(ImDrawList* draw, const Hit& hit, ImVec2 origin, ImVec2 size, bool wholePiece) const;
+    void paintAt(const Hit& hit, bool wholePiece);
+    void finishPaintStroke();
     void focusSelection();
     void setViewFromMatrix(const glm::mat4& view);
 
@@ -78,7 +88,9 @@ private:
     void undo();
     void redo();
     void validateSelection();
-    [[nodiscard]] bool editInProgress() const { return gizmoEdit_.has_value() || inspectorEdit_.has_value(); }
+    [[nodiscard]] bool editInProgress() const {
+        return gizmoEdit_.has_value() || inspectorEdit_.has_value() || !paintStroke_.empty();
+    }
 
     // Escena y archivos
     void requestSceneChange(SceneChange change, std::filesystem::path path = {});
@@ -124,6 +136,10 @@ private:
     // Estado previo de la entidad al empezar un arrastre del gizmo o del Inspector.
     std::optional<ge3d::Entity> gizmoEdit_;
     std::optional<ge3d::Entity> inspectorEdit_;
+    // Trazo de pintura en curso: estado previo de cada pieza tocada. Se guarda como una sola operación.
+    std::map<ge3d::EntityId, ge3d::Entity> paintStroke_;
+    bool painting_ = false;
+    ge3d::PaletteIndex paintColor_ = ge3d::paletteOrange;
     char nameBuffer_[128]{};
     bool nameEditing_ = false;
     char pathBuffer_[512]{};

@@ -49,6 +49,13 @@ void testStarterGeometry() {
     const auto ramp = ge3d::makePrimitive(ge3d::Primitive::ramp);
     expect(box.triangles.size() == 12, "la caja tiene 12 triangulos");
     expect(ramp.triangles.size() == 8, "la rampa tiene 8 triangulos");
+    for (const auto primitive : {ge3d::Primitive::box, ge3d::Primitive::ramp}) {
+        const auto mesh = ge3d::makePrimitive(primitive);
+        for (const auto& triangle : mesh.triangles) {
+            expect(triangle.face < ge3d::faceCount(primitive), "cada triangulo pertenece a una cara pintable");
+        }
+    }
+    expect(ge3d::faceCount(ge3d::Primitive::ramp) <= ge3d::maxFaces, "la rampa cabe en el array de caras");
     for (const auto* mesh : {&box, &ramp}) {
         for (const auto& triangle : mesh->triangles) {
             for (const auto index : triangle.indices) {
@@ -140,6 +147,7 @@ void testSerialization() {
     auto scene = ge3d::makeStarterScene();
     scene.find(idOf(scene, "Crate"))->transform.position.x = 0.3f;
     scene.find(idOf(scene, "Ramp"))->transform.rotationDegrees = {0, 45, 0};
+    scene.find(idOf(scene, "Crate"))->faces = {0, 1, 2, 9, 12, 23};
     scene.create("Puerta \xC3\xB1", ge3d::Primitive::box, {{1, 2, 3}, {10, 20, 30}, {0.5f, 2, 0.1f}});
 
     const auto text = ge3d::serializeScene(scene);
@@ -151,7 +159,8 @@ void testSerialization() {
     for (std::size_t i = 0; i < std::min(loaded.entities().size(), scene.entities().size()); ++i) {
         const auto& a = scene.entities()[i];
         const auto& b = loaded.entities()[i];
-        expect(a.uuid == b.uuid && a.name == b.name && a.primitive == b.primitive && a.transform == b.transform,
+        expect(a.uuid == b.uuid && a.name == b.name && a.primitive == b.primitive && a.transform == b.transform &&
+               a.faces == b.faces,
                "cada entidad sobrevive a guardar y cargar");
     }
     expect(ge3d::serializeScene(loaded) == text, "guardar dos veces produce el mismo texto");
@@ -165,6 +174,23 @@ void testSerialization() {
         return R"({"format":"ge3d.scene","version":)" + std::to_string(version) + R"(,"entities":[)" + entities + "]}";
     };
     expect(ge3d::parseScene(document(entity(uuid, "box", "[1,1,1]"))).entities().size() == 1, "escena minima valida");
+
+    // Migración: una escena v1 (sin "faces") recibe los colores por defecto de cada primitiva.
+    const auto migrated = ge3d::parseScene(document(entity(uuid, "ramp", "[1,1,1]")));
+    expect(migrated.entities()[0].faces == ge3d::defaultFaceColors(ge3d::Primitive::ramp),
+           "una escena v1 se migra con los colores por defecto");
+    const auto withFaces = [&](const std::string& faces) {
+        return R"({"format":"ge3d.scene","version":2,"entities":[{"uuid":")" + uuid +
+               R"(","name":"A","primitive":"box","position":[0,0,0],"rotationDegrees":[0,0,0],"scale":[1,1,1])" +
+               faces + "}]}";
+    };
+    const auto painted = ge3d::parseScene(withFaces(R"(,"faces":[0,1,2,3,4,23])"));
+    expect(painted.entities()[0].faces == ge3d::FaceColors{0, 1, 2, 3, 4, 23}, "una escena v2 conserva los colores");
+    for (const auto& faces : {std::string(""), std::string(R"(,"faces":[0,1,2,3,4])"),
+                              std::string(R"(,"faces":[0,1,2,3,4,24])"), std::string(R"(,"faces":[0,1,2,3,4,-1])"),
+                              std::string(R"(,"faces":[0,1,2,3,4,"rojo"])")}) {
+        expect(throwsFormatError([&] { (void)ge3d::parseScene(withFaces(faces)); }), "caras invalidas en v2 se rechazan");
+    }
 
     const std::vector<std::string> invalid = {
         "",

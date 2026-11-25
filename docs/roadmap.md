@@ -8,7 +8,7 @@ La base C++20 incluye un runtime compartido, ejecutables de consola, un editor V
 |---|---|---|---|
 | 0 | ✅ Completa | CMake con presets MSVC y MinGW, runtime, CTest, sondeo Vulkan. | — |
 | 1 | ✅ Completa | Ventana GLFW, Vulkan 1.3 con dynamic rendering, offscreen 320 × 180 con sampler nearest, cuadrícula, picking, gizmos, Inspector. Capas de validación activas en Debug: 0 errores tras redimensionar, minimizar, restaurar y cerrar minimizada. | Geometry pool por chunks cuando haya más mallas que caja y rampa. |
-| 2 | 🟡 En curso | UUID v4 por entidad, escena JSON versionada con guardado atómico y validación antes de sustituir, historial deshacer/rehacer (crear, duplicar, borrar, renombrar, gizmo e Inspector como una operación), menús y atajos. | Ajuste a cuadrícula al colocar con pincel, relleno y repetición, pintar caras, prefabs, transform con cuaternión, jerarquía padre/hijo. |
+| 2 | 🟡 En curso | UUID v4 por entidad, escena JSON versionada (v2, con migración desde v1) con guardado atómico y validación antes de sustituir, historial deshacer/rehacer (crear, duplicar, borrar, renombrar, gizmo e Inspector como una operación), menús y atajos. Pintar caras con paleta indexada de 24 colores (herramienta B, trazo = una operación, cuentagotas). Cuadrícula infinita. | Pincel de construcción con ajuste a cuadrícula, relleno y repetición. Prefabs, transform con cuaternión y jerarquía padre/hijo (no bloquean la etapa 3). |
 | 3 | 🟡 Base | Play / Pausa / Paso: Play juega sobre una copia de la escena y Stop la descarta (edición y deshacer separados). Consola del editor. | Luau, pestaña Código, parámetros de script en el Inspector, eventos. |
 | 4 – 7 | ⬜ Sin empezar | — | Según la tabla siguiente. |
 

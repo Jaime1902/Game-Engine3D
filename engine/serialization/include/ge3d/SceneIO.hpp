@@ -9,9 +9,12 @@
 namespace ge3d {
 
 // Escenas en JSON UTF-8 versionado:
-// { "format": "ge3d.scene", "version": 1, "entities": [ { "uuid", "name", "primitive",
-//   "position", "rotationDegrees", "scale" } ] }
-inline constexpr int sceneFormatVersion = 1;
+// { "format": "ge3d.scene", "version": 2, "entities": [ { "uuid", "name", "primitive",
+//   "position", "rotationDegrees", "scale", "faces" } ] }
+// Historial del formato:
+//   1  Entidades con UUID, nombre, primitiva y transformación.
+//   2  "faces": 6 índices de la paleta, uno por cara. Al leer una v1 se usan los colores por defecto.
+inline constexpr int sceneFormatVersion = 2;
 
 // El contenido no es una escena válida. La escena abierta no debe sustituirse.
 class SceneFormatError : public std::runtime_error {

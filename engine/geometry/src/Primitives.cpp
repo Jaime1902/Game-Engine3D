@@ -24,4 +24,15 @@ Mesh makePrimitive(Primitive primitive) {
     throw std::invalid_argument("Unknown primitive");
 }
 
+std::uint32_t faceCount(Primitive primitive) noexcept {
+    return primitive == Primitive::box ? 6 : 5;
+}
+
+const char* faceName(Primitive primitive, std::uint32_t face) noexcept {
+    static constexpr const char* box[] = {"Abajo", "Arriba", "Frente", "Fondo", "Izquierda", "Derecha"};
+    static constexpr const char* ramp[] = {"Abajo", "Pendiente", "Pared", "Lado izquierdo", "Lado derecho"};
+    if (face >= faceCount(primitive)) return "?";
+    return primitive == Primitive::box ? box[face] : ramp[face];
+}
+
 }

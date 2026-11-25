@@ -1,10 +1,13 @@
 // transform: matriz completa (cámara * modelo).
 // fade:      xy = centro del desvanecimiento en coordenadas locales, z = radio local (0 = sin desvanecer).
-// grid:      xy = desplazamiento en el mundo (x, z), z = separación entre líneas, w = 1 si es la cuadrícula.
+// grid:      xy = desplazamiento en el mundo (x, z), z = separación entre líneas,
+//            w = modo: 0 color del vértice, 1 cuadrícula, 2 pieza pintada por caras.
+// faces:     color RGB empaquetado (0xBBGGRR) de cada una de las 6 caras de la pieza.
 struct ScenePush {
     float4x4 transform;
     float4 fade;
     float4 grid;
+    uint faces[6];
 };
 
 [[vk::push_constant]] ConstantBuffer<ScenePush> scene;
@@ -20,10 +23,29 @@ struct Pixel {
     float2 local : TEXCOORD0;
 };
 
+float3 unpackColor(uint packed) {
+    return float3(float(packed & 0xFFu), float((packed >> 8) & 0xFFu), float((packed >> 16) & 0xFFu)) / 255.0;
+}
+
 Pixel vertexMain(Vertex input) {
     Pixel output;
     output.position = mul(scene.transform, float4(input.position, 1.0));
     output.color = input.color;
+    if (scene.grid.w > 1.5) {
+        // En las piezas, color.x es la luz de la cara y color.y su número.
+        // Índice siempre dentro del array: un acceso fuera de rango es indefinido y el compilador
+        // puede optimizar asumiendo que nunca ocurre.
+        uint face = min(uint(input.color.y + 0.5), 5u);
+        // Se elige el color con lecturas de índice fijo: el índice variable directamente sobre
+        // push constants devolvía siempre la cara 0 en este driver (SPIR-V válido, resultado erróneo).
+        uint packed = scene.faces[0];
+        if (face == 1u) packed = scene.faces[1];
+        if (face == 2u) packed = scene.faces[2];
+        if (face == 3u) packed = scene.faces[3];
+        if (face == 4u) packed = scene.faces[4];
+        if (face == 5u) packed = scene.faces[5];
+        output.color = unpackColor(packed) * input.color.x;
+    }
     output.local = input.position.xz;
     return output;
 }

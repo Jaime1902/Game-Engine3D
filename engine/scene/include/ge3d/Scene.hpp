@@ -1,6 +1,8 @@
 #pragma once
 
+#include "ge3d/Palette.hpp"
 #include "ge3d/Uuid.hpp"
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -28,12 +30,23 @@ struct Transform {
     friend bool operator==(const Transform&, const Transform&) = default;
 };
 
+// Color de cada cara como índice de la paleta. La caja usa las 6; la rampa, las 5 primeras.
+// El orden de las caras es el de makePrimitive (ver faceName en Primitives.hpp).
+inline constexpr std::size_t maxFaces = 6;
+using FaceColors = std::array<PaletteIndex, maxFaces>;
+
+[[nodiscard]] constexpr FaceColors defaultFaceColors(Primitive primitive) {
+    const PaletteIndex color = primitive == Primitive::box ? paletteOrange : paletteSeaGreen;
+    return {color, color, color, color, color, color};
+}
+
 struct Entity {
     EntityId id{};
     Uuid uuid{};
     std::string name;
     Primitive primitive{Primitive::box};
     Transform transform{};
+    FaceColors faces = defaultFaceColors(Primitive::box);
     friend bool operator==(const Entity&, const Entity&) = default;
 };
 

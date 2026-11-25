@@ -174,8 +174,14 @@ struct ScenePush {
     glm::mat4 transform{1.0f};
     glm::vec4 fade{0.0f};
     glm::vec4 grid{0.0f};
+    std::array<std::uint32_t, ge3d::maxFaces> faces{};
 };
-static_assert(sizeof(ScenePush) == 96, "ScenePush debe ocupar 96 bytes (limite garantizado: 128)");
+static_assert(sizeof(ScenePush) == 120, "ScenePush debe ocupar 120 bytes (limite garantizado: 128)");
+
+std::uint32_t packPaletteColor(ge3d::PaletteIndex index) {
+    const auto& color = ge3d::defaultPalette[index < ge3d::paletteSize ? index : 0];
+    return std::uint32_t{color.r} | (std::uint32_t{color.g} << 8) | (std::uint32_t{color.b} << 16);
+}
 constexpr VkShaderStageFlags pushStages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
 // Semiancho de la cuadrícula base en líneas. Se recoloca y se escala cada fotograma según la cámara.
@@ -197,7 +203,8 @@ struct SceneGeometry {
 
 SceneGeometry makeGeometry() {
     SceneGeometry geometry;
-    const auto append = [&](ge3d::Primitive primitive, glm::vec3 base) {
+    // Cada vértice guarda (luz de la cara, número de cara, 0). El color lo pone el shader con la paleta.
+    const auto append = [&](ge3d::Primitive primitive) {
         auto mesh = ge3d::makePrimitive(primitive);
         MeshRange range{static_cast<std::uint32_t>(geometry.indices.size()), 0};
         std::map<std::pair<std::uint32_t, std::uint32_t>, std::uint32_t> faceVertices;
@@ -208,7 +215,8 @@ SceneGeometry makeGeometry() {
                     std::pair{triangle.face, index}, static_cast<std::uint32_t>(geometry.vertices.size()));
                 if (inserted) {
                     const auto position = mesh.positions[index];
-                    geometry.vertices.push_back({{position.x, position.y, position.z}, base * light[triangle.face]});
+                    geometry.vertices.push_back({{position.x, position.y, position.z},
+                        {light[triangle.face], static_cast<float>(triangle.face), 0.0f}});
                 }
                 geometry.indices.push_back(it->second);
             }
@@ -216,8 +224,8 @@ SceneGeometry makeGeometry() {
         range.count = static_cast<std::uint32_t>(geometry.indices.size()) - range.firstIndex;
         return range;
     };
-    geometry.box = append(ge3d::Primitive::box, {0.92f, 0.62f, 0.31f});
-    geometry.ramp = append(ge3d::Primitive::ramp, {0.40f, 0.71f, 0.66f});
+    geometry.box = append(ge3d::Primitive::box);
+    geometry.ramp = append(ge3d::Primitive::ramp);
     geometry.gridFirst = static_cast<std::uint32_t>(geometry.vertices.size());
     const auto line = [&](glm::vec3 a, glm::vec3 b, glm::vec3 color) {
         geometry.vertices.push_back({a, color});
@@ -877,6 +885,10 @@ void run() {
             for (const auto& entity : editor.scene().entities()) {
                 ScenePush push;
                 push.transform = camera * EditorView::modelMatrix(entity.transform);
+                push.grid.w = 2.0f;
+                for (std::size_t face = 0; face < ge3d::maxFaces; ++face) {
+                    push.faces[face] = packPaletteColor(entity.faces[face]);
+                }
                 const auto mesh = entity.primitive == ge3d::Primitive::box ? geometry.box : geometry.ramp;
                 vkCmdPushConstants(command, pipelineLayout, pushStages, 0, sizeof(push), &push);
                 vkCmdDrawIndexed(command, mesh.count, 1, mesh.firstIndex, 0, 0);

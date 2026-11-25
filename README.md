@@ -33,15 +33,16 @@ El editor requiere una GPU con Vulkan 1.3, dynamic rendering y synchronization2.
 |---|---|
 | **Jerarquía** (izquierda) | Objetos de la escena. **+** crea objetos, el buscador filtra, clic derecho para duplicar o eliminar, doble clic para enfocar |
 | **Escena** (centro) | Vista 320 × 180. Cubo de orientación arriba a la derecha: clic en una cara para alinear la cámara. El mundo no tiene bordes: la cuadrícula sigue a la cámara, pasa a líneas cada 10 m o 100 m al alejarse y se desvanece con tramado |
-| **Inspector** (derecha) | Nombre, Transformación (posición, rotación, escala) y Forma del objeto seleccionado |
+| **Inspector** (derecha) | Nombre, Transformación (posición, rotación, escala), Forma y Colores por cara del objeto seleccionado |
 | **Proyecto** (abajo) | Archivos de `projects/pueblo/Content`. Doble clic en una escena para abrirla |
 | **Consola** (abajo) | Mensajes del editor y de Vulkan, con filtros por tipo |
 
-La barra superior tiene las herramientas **Mano (Q)**, **Mover (W)**, **Rotar (E)** y **Escalar (R)**, el cambio de ejes Global o Local y **Ajuste**, que mueve en pasos de 0,25 y rota en pasos de 15°. En el centro están **Play**, **Pausa** y **Paso**. En Play el editor se tiñe de azul, y al detener se descartan los cambios hechos durante el juego. La simulación llegará con las etapas 3 y 4.
+La barra superior tiene las herramientas **Mano (Q)**, **Mover (W)**, **Rotar (E)**, **Escalar (R)** y **Pintar (B)**, el cambio de ejes Global o Local y **Ajuste**, que mueve en pasos de 0,25 y rota en pasos de 15°. Con Pintar, la paleta de 24 colores aparece en la barra de la vista y la cara bajo el cursor se resalta con el color elegido. Todo un trazo se deshace de una vez. Las caras guardan un índice de la paleta (`engine/scene/include/ge3d/Palette.hpp`), así que cambiar un color de la paleta recolorea toda la escena. En el centro están **Play**, **Pausa** y **Paso**. En Play el editor se tiñe de azul, y al detener se descartan los cambios hechos durante el juego. La simulación llegará con las etapas 3 y 4.
 
 | Acción | Atajo |
 |---|---|
 | Orbitar / desplazar / acercar | Clic derecho o Alt + clic izquierdo / botón central / rueda |
+| Pintar (herramienta B) | Clic o arrastre: la cara bajo el cursor · Shift + clic: toda la pieza · Ctrl + clic: tomar el color |
 | Enfocar selección | **F** |
 | Duplicar / eliminar | **Ctrl+D** / **Supr** |
 | Deshacer / rehacer | **Ctrl+Z** / **Ctrl+Y** |

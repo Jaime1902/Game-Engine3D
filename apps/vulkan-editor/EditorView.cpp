@@ -127,7 +127,7 @@ ImFont* loadFonts(float scale, ImFont*& bold) {
 }
 
 // --- Iconos dibujados con primitivas (la fuente no trae iconos) -------------------------------
-enum class Icon { hand, move, rotate, scale, play, pause, step, cube, ramp, folder, file, scene };
+enum class Icon { hand, move, rotate, scale, paint, play, pause, step, cube, ramp, folder, file, scene };
 
 void drawIcon(ImDrawList* draw, Icon icon, ImVec2 center, float r, ImU32 color) {
     const float t = std::max(1.0f, r * 0.17f);
@@ -161,6 +161,12 @@ void drawIcon(ImDrawList* draw, Icon icon, ImVec2 center, float r, ImU32 color) 
         draw->AddRect(p(-0.85f, -0.85f), p(0.85f, 0.85f), color, 0, 0, t);
         draw->AddRectFilled(p(0.1f, -0.85f), p(0.85f, -0.1f), color);
         draw->AddLine(p(-0.55f, 0.55f), p(0.15f, -0.15f), color, t);
+        break;
+    case Icon::paint:
+        // Brocha: mango en diagonal, virola y punta.
+        draw->AddLine(p(0.85f, -0.85f), p(0.05f, -0.05f), color, t * 1.6f);
+        draw->AddQuadFilled(p(0.12f, -0.32f), p(0.32f, -0.12f), p(-0.05f, 0.25f), p(-0.25f, 0.05f), color);
+        draw->AddTriangleFilled(p(-0.25f, 0.05f), p(-0.05f, 0.25f), p(-0.85f, 0.85f), color);
         break;
     case Icon::play:
         draw->AddTriangleFilled(p(-0.55f, -0.8f), p(0.8f, 0), p(-0.55f, 0.8f), color);
@@ -285,6 +291,43 @@ void vectorRow(const char* label, ge3d::Vec3& value, float speed, float minimum,
         ImGui::PopID();
     }
     ImGui::PopID();
+}
+
+// --- Paleta -------------------------------------------------------------------------------------
+
+ImVec4 paletteColor(ge3d::PaletteIndex index) {
+    const auto& color = ge3d::defaultPalette[index < ge3d::paletteSize ? index : 0];
+    return {color.r / 255.0f, color.g / 255.0f, color.b / 255.0f, 1.0f};
+}
+
+// Muestra de un color de la paleta; la seleccionada lleva un marco blanco.
+bool paletteSwatch(const char* id, ge3d::PaletteIndex index, bool selected, float size) {
+    const bool pressed = ImGui::ColorButton(id, paletteColor(index),
+        ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoAlpha | ImGuiColorEditFlags_NoDragDrop, {size, size});
+    if (selected) {
+        auto* draw = ImGui::GetWindowDrawList();
+        const ImVec2 min = ImGui::GetItemRectMin();
+        const ImVec2 max = ImGui::GetItemRectMax();
+        draw->AddRect({min.x - 2, min.y - 2}, {max.x + 2, max.y + 2}, IM_COL32(255, 255, 255, 255), 0, 0, 2);
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%u  %s", static_cast<unsigned>(index), ge3d::defaultPalette[index].name);
+    return pressed;
+}
+
+// Rejilla con toda la paleta. Devuelve true si se eligió un color.
+bool palettePicker(ge3d::PaletteIndex& index, float size, int perRow) {
+    bool changed = false;
+    for (std::size_t i = 0; i < ge3d::paletteSize; ++i) {
+        if (i % static_cast<std::size_t>(perRow) != 0) ImGui::SameLine(0, 4);
+        ImGui::PushID(static_cast<int>(i));
+        const auto color = static_cast<ge3d::PaletteIndex>(i);
+        if (paletteSwatch("##color", color, color == index, size)) {
+            index = color;
+            changed = true;
+        }
+        ImGui::PopID();
+    }
+    return changed;
 }
 
 // Cabecera plegable de componente en el Inspector (gris, no del color de selección).
@@ -413,7 +456,15 @@ glm::mat4 EditorView::modelMatrix(const ge3d::Transform& transform) {
     return model;
 }
 
-void EditorView::pick(ImVec2 mouse, ImVec2 origin, ImVec2 size) {
+namespace {
+const ge3d::Mesh& meshOf(ge3d::Primitive primitive) {
+    static const auto box = ge3d::makePrimitive(ge3d::Primitive::box);
+    static const auto ramp = ge3d::makePrimitive(ge3d::Primitive::ramp);
+    return primitive == ge3d::Primitive::box ? box : ramp;
+}
+}
+
+std::optional<EditorView::Hit> EditorView::raycast(ImVec2 mouse, ImVec2 origin, ImVec2 size) const {
     const auto inverse = glm::inverse(projection() * view());
     const float x = (mouse.x - origin.x) / size.x * 2 - 1;
     const float y = 1 - (mouse.y - origin.y) / size.y * 2;
@@ -421,25 +472,89 @@ void EditorView::pick(ImVec2 mouse, ImVec2 origin, ImVec2 size) {
     const auto far = inverse * glm::vec4(x, y, 1, 1);
     const auto start = glm::vec3(near) / near.w;
     const auto direction = glm::normalize(glm::vec3(far) / far.w - start);
-    static const auto box = ge3d::makePrimitive(ge3d::Primitive::box);
-    static const auto ramp = ge3d::makePrimitive(ge3d::Primitive::ramp);
-    float closest = std::numeric_limits<float>::infinity();
-    selected_ = 0;
+    std::optional<Hit> best;
     for (const auto& entity : scene_.entities()) {
         const auto model = modelMatrix(entity.transform);
-        const auto& mesh = entity.primitive == ge3d::Primitive::box ? box : ramp;
+        const auto& mesh = meshOf(entity.primitive);
         for (const auto& triangle : mesh.triangles) {
             const auto point = [&](std::uint32_t index) {
                 return glm::vec3(model * glm::vec4(vector(mesh.positions[index]), 1));
             };
             const auto& indices = triangle.indices;
             const auto distance = hitTriangle(start, direction, point(indices[0]), point(indices[1]), point(indices[2]));
-            if (distance >= 0 && distance < closest) {
-                closest = distance;
-                selected_ = entity.id;
-            }
+            if (distance >= 0 && (!best || distance < best->distance)) best = Hit{entity.id, triangle.face, distance};
         }
     }
+    return best;
+}
+
+void EditorView::pick(ImVec2 mouse, ImVec2 origin, ImVec2 size) {
+    const auto hit = raycast(mouse, origin, size);
+    selected_ = hit ? hit->entity : 0;
+}
+
+void EditorView::drawFacePreview(ImDrawList* draw, const Hit& hit, ImVec2 origin, ImVec2 size, bool wholePiece) const {
+    const auto* entity = scene_.find(hit.entity);
+    if (!entity) return;
+    const auto matrix = projection() * view() * modelMatrix(entity->transform);
+    const auto& mesh = meshOf(entity->primitive);
+    auto fill = paletteColor(paintColor_);
+    fill.w = 0.4f;
+    const ImU32 fillColor = ImGui::GetColorU32(fill);
+    const ImU32 lineColor = IM_COL32(255, 255, 255, 220);
+    const auto project = [&](std::uint32_t index, ImVec2& out) {
+        const auto clip = matrix * glm::vec4(vector(mesh.positions[index]), 1);
+        if (clip.w <= 0.001f) return false;
+        const glm::vec2 ndc{clip.x / clip.w, clip.y / clip.w};
+        out = {origin.x + (ndc.x * 0.5f + 0.5f) * size.x, origin.y + (0.5f - ndc.y * 0.5f) * size.y};
+        return true;
+    };
+    // Se rellenan los triángulos de la cara y se perfilan solo sus bordes exteriores
+    // (las aristas que aparecen una sola vez), sin la diagonal interna.
+    std::map<std::pair<std::uint32_t, std::uint32_t>, int> edges;
+    for (const auto& triangle : mesh.triangles) {
+        if (!wholePiece && triangle.face != hit.face) continue;
+        ImVec2 points[3];
+        bool visible = true;
+        for (std::size_t i = 0; i < 3; ++i) visible = visible && project(triangle.indices[i], points[i]);
+        if (!visible) continue;
+        draw->AddTriangleFilled(points[0], points[1], points[2], fillColor);
+        for (std::size_t i = 0; i < 3; ++i) {
+            const auto a = triangle.indices[i];
+            const auto b = triangle.indices[(i + 1) % 3];
+            ++edges[{std::min(a, b), std::max(a, b)}];
+        }
+    }
+    for (const auto& [edge, count] : edges) {
+        ImVec2 a, b;
+        if ((count == 1 || wholePiece) && project(edge.first, a) && project(edge.second, b)) {
+            draw->AddLine(a, b, lineColor, 1.5f);
+        }
+    }
+}
+
+void EditorView::paintAt(const Hit& hit, bool wholePiece) {
+    auto* entity = scene_.find(hit.entity);
+    if (!entity) return;
+    auto faces = entity->faces;
+    if (wholePiece) faces.fill(paintColor_);
+    else faces[hit.face] = paintColor_;
+    if (faces == entity->faces) return;
+    paintStroke_.try_emplace(entity->id, *entity);
+    entity->faces = faces;
+}
+
+void EditorView::finishPaintStroke() {
+    painting_ = false;
+    if (paintStroke_.empty()) return;
+    // Todo el trazo, aunque toque varias piezas, se deshace de una vez.
+    ge3d::EditCommand command;
+    command.label = "Pintar";
+    for (const auto& [id, before] : paintStroke_) {
+        if (auto change = ge3d::makeModifyCommand(scene_, before, "")) command.changes.push_back(change->changes.front());
+    }
+    paintStroke_.clear();
+    activeHistory().record(std::move(command));
 }
 
 void EditorView::focusSelection() {
@@ -685,6 +800,7 @@ void EditorView::handleShortcuts() {
         if (ImGui::Shortcut(ImGuiKey_W, once)) tool_ = Tool::move;
         if (ImGui::Shortcut(ImGuiKey_E, once)) tool_ = Tool::rotate;
         if (ImGui::Shortcut(ImGuiKey_R, once)) tool_ = Tool::scale;
+        if (ImGui::Shortcut(ImGuiKey_B, once)) tool_ = Tool::paint;
         if (ImGui::Shortcut(ImGuiKey_F, once)) focusSelection();
     }
 }
@@ -762,6 +878,8 @@ void EditorView::drawToolbar() {
             {Tool::move, Icon::move, "##mover", "Mover (W)"},
             {Tool::rotate, Icon::rotate, "##rotar", "Rotar (E)"},
             {Tool::scale, Icon::scale, "##escalar", "Escalar (R)"},
+            {Tool::paint, Icon::paint, "##pintar", "Pintar caras (B)\nClic o arrastre: pinta la cara\n"
+                                                   "Shift+clic: pinta toda la pieza\nCtrl+clic: toma el color (cuentagotas)"},
         };
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {1.0f, 0.0f});
         for (const auto& item : tools) {
@@ -899,7 +1017,8 @@ void EditorView::drawShortcutsPopup() {
     bool open = true;
     if (!ImGui::BeginPopupModal(title, &open, ImGuiWindowFlags_AlwaysAutoResize)) return;
     static const char* rows[][2] = {
-        {"Q / W / E / R", "Mano, mover, rotar, escalar"},
+        {"Q / W / E / R / B", "Mano, mover, rotar, escalar, pintar"},
+        {"Pintar: Shift / Ctrl + clic", "Pintar toda la pieza / tomar el color"},
         {"F", "Enfocar la seleccion"},
         {"Clic derecho + arrastrar", "Orbitar la camara (tambien Alt + clic izquierdo)"},
         {"Boton central + arrastrar", "Desplazar la vista"},
@@ -1056,6 +1175,41 @@ void EditorView::drawInspector() {
             ImGui::Spacing();
         }
 
+        // Componente Colores: un color de la paleta por cara.
+        if (componentHeader("Colores", boldFont_)) {
+            const float labelWidth = std::max(70.0f, ImGui::GetContentRegionAvail().x * 0.30f);
+            const float swatch = ImGui::GetFrameHeight();
+            const auto faceRow = [&](const char* label, int face) {
+                ImGui::PushID(face);
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted(label);
+                ImGui::SameLine(labelWidth);
+                const auto shown = entity->faces[face < 0 ? 0 : static_cast<std::size_t>(face)];
+                if (paletteSwatch("##muestra", shown, false, swatch)) ImGui::OpenPopup("paleta");
+                ImGui::SameLine();
+                ImGui::TextDisabled("%s", ge3d::defaultPalette[shown].name);
+                if (ImGui::BeginPopup("paleta")) {
+                    auto chosen = shown;
+                    if (palettePicker(chosen, swatch, 8)) {
+                        std::optional<ge3d::Entity> before = frameStart;
+                        if (face < 0) entity->faces.fill(chosen);
+                        else entity->faces[static_cast<std::size_t>(face)] = chosen;
+                        commitModification(before, "Pintar");
+                        paintColor_ = chosen;
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::EndPopup();
+                }
+                ImGui::PopID();
+            };
+            faceRow("Toda la pieza", -1);
+            ImGui::Separator();
+            for (std::uint32_t face = 0; face < ge3d::faceCount(entity->primitive); ++face) {
+                faceRow(ge3d::faceName(entity->primitive, face), static_cast<int>(face));
+            }
+            ImGui::Spacing();
+        }
+
         ImGui::Separator();
         ImGui::Spacing();
         const float buttonWidth = std::min(ImGui::GetContentRegionAvail().x, 220 * scale_);
@@ -1083,11 +1237,28 @@ void EditorView::drawViewport(ImTextureID sceneTexture) {
         ImGui::PushStyleColor(ImGuiCol_ChildBg, gray(0.19f));
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {6 * scale_, 3 * scale_});
         if (ImGui::BeginChild("##barra_escena", {0, ImGui::GetFrameHeight() + 6 * scale_},
-                              ImGuiChildFlags_AlwaysUseWindowPadding)) {
+                              ImGuiChildFlags_AlwaysUseWindowPadding,
+                              ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
             if (toggleButton("Cuadricula", showGrid_, "Mostrar u ocultar la cuadricula del suelo")) showGrid_ = !showGrid_;
             ImGui::SameLine();
             if (ImGui::Button("Enfocar")) focusSelection();
             ImGui::SetItemTooltip("Encuadrar la seleccion (F)");
+            if (tool_ == Tool::paint) {
+                // Con la herramienta Pintar, la paleta queda a mano en la barra de la vista.
+                ImGui::SameLine(0, 16 * scale_);
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextDisabled("Color");
+                ImGui::SameLine();
+                const float swatch = ImGui::GetFrameHeight() * 0.8f;
+                ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (ImGui::GetFrameHeight() - swatch) * 0.5f);
+                for (std::size_t i = 0; i < ge3d::paletteSize; ++i) {
+                    if (i) ImGui::SameLine(0, 3);
+                    ImGui::PushID(static_cast<int>(i));
+                    const auto color = static_cast<ge3d::PaletteIndex>(i);
+                    if (paletteSwatch("##paleta", color, color == paintColor_, swatch)) paintColor_ = color;
+                    ImGui::PopID();
+                }
+            }
             const char* info = "320 x 180  |  Perspectiva";
             ImGui::SameLine(std::max(ImGui::GetCursorPosX() + 10, ImGui::GetWindowWidth() - ImGui::CalcTextSize(info).x - 10 * scale_));
             ImGui::AlignTextToFramePadding();
@@ -1142,14 +1313,16 @@ void EditorView::drawViewport(ImTextureID sceneTexture) {
             const auto projectionMatrix = projection();
             bool overGizmo = false;
             auto* entity = scene_.find(selected_);
-            if (entity && tool_ != Tool::hand && !orbiting_) {
-                const ImGuizmo::OPERATION operations[] = {ImGuizmo::TRANSLATE, ImGuizmo::TRANSLATE, ImGuizmo::ROTATE, ImGuizmo::SCALE};
+            const bool gizmoTool = tool_ == Tool::move || tool_ == Tool::rotate || tool_ == Tool::scale;
+            if (entity && gizmoTool && !orbiting_) {
+                const ImGuizmo::OPERATION operation = tool_ == Tool::move ? ImGuizmo::TRANSLATE
+                                                    : tool_ == Tool::rotate ? ImGuizmo::ROTATE : ImGuizmo::SCALE;
                 const float step = tool_ == Tool::rotate ? 15.0f : 0.25f;
                 const float snapValues[] = {step, step, step};
                 const ge3d::Entity beforeManipulate = *entity;
                 auto model = modelMatrix(entity->transform);
                 if (ImGuizmo::Manipulate(glm::value_ptr(viewMatrix), glm::value_ptr(projectionMatrix),
-                        operations[static_cast<int>(tool_)],
+                        operation,
                         localAxes_ || tool_ == Tool::scale ? ImGuizmo::LOCAL : ImGuizmo::WORLD,
                         glm::value_ptr(model), nullptr, snap_ ? snapValues : nullptr)) {
                     float translation[3], rotation[3], scaling[3];
@@ -1176,9 +1349,27 @@ void EditorView::drawViewport(ImTextureID sceneTexture) {
             ImGuizmo::ViewManipulate(glm::value_ptr(viewMatrix), distance_, {end.x - cube, origin.y}, {cube, cube}, 0x00000000);
             if (viewMatrix != previousView) setViewFromMatrix(viewMatrix);
             const bool overCube = ImGuizmo::IsViewManipulateHovered();
+
+            const bool canUseMouse = hovered && !overGizmo && !overCube && !io.KeyAlt && !orbiting_ && !panning_;
+            if (tool_ == Tool::paint) {
+                // Pintar: vista previa de la cara bajo el cursor, trazo con arrastre, cuentagotas con Ctrl.
+                const auto hit = canUseMouse ? raycast(io.MousePos, origin, size) : std::nullopt;
+                if (hit && !io.KeyCtrl) drawFacePreview(draw, *hit, origin, size, io.KeyShift);
+                if (hit && io.KeyCtrl && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                    if (const auto* target = scene_.find(hit->entity)) {
+                        paintColor_ = target->faces[hit->face];
+                        log(std::string("Color tomado: ") + ge3d::defaultPalette[paintColor_].name);
+                    }
+                } else if (canUseMouse && !io.KeyCtrl && ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
+                           (painting_ || ImGui::IsMouseClicked(ImGuiMouseButton_Left))) {
+                    if (!painting_) ImGui::SetWindowFocus();
+                    painting_ = true;
+                    if (hit) paintAt(*hit, io.KeyShift);
+                }
+            }
             draw->PopClipRect();
 
-            if (hovered && !overGizmo && !overCube && !io.KeyAlt && tool_ != Tool::hand &&
+            if (canUseMouse && tool_ != Tool::hand && tool_ != Tool::paint &&
                 ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                 ImGui::SetWindowFocus();
                 pick(io.MousePos, origin, size);
@@ -1187,9 +1378,10 @@ void EditorView::drawViewport(ImTextureID sceneTexture) {
         }
     }
     ImGui::End();
+    if (painting_ && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) finishPaintStroke();
     if (gizmoEdit_ && (!ImGuizmo::IsUsing() || !ImGui::IsMouseDown(ImGuiMouseButton_Left))) {
-        const char* labels[] = {"Mover", "Mover", "Rotar", "Escalar"};
-        commitModification(gizmoEdit_, labels[static_cast<int>(tool_)]);
+        const char* label = tool_ == Tool::rotate ? "Rotar" : tool_ == Tool::scale ? "Escalar" : "Mover";
+        commitModification(gizmoEdit_, label);
     }
 }
 
