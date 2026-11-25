@@ -49,6 +49,7 @@ public:
     explicit EditorView(float uiScale = 1.0f);
     void draw(ImTextureID sceneTexture);
     [[nodiscard]] SceneView sceneView() const;
+    [[nodiscard]] glm::vec3 cameraPosition() const;
     [[nodiscard]] const RenderStyle& renderStyle() const { return style_; }
     // Tamaño que la vista necesita (puede superar la capacidad actual de las imágenes).
     [[nodiscard]] glm::uvec2 requestedSceneExtent() const { return requestedExtent_; }
@@ -81,7 +82,7 @@ public:
 
 private:
     enum class Tool { hand, move, rotate, scale, paint, build, terrain };
-    enum class TerrainBrush { add, remove, paint, flatten, smooth };
+    enum class TerrainBrush { add, remove, paint, flatten, smooth, water };
     struct Hit {
         ge3d::EntityId entity{};
         std::uint32_t face{};       // pieza: número de cara; terreno: normal 0-5 (-X +X -Y +Y -Z +Z)
@@ -144,6 +145,10 @@ private:
     void drawTerrainComponent(ge3d::Entity& entity, const ge3d::Entity& frameStart);
     void drawHeightmapComponent(ge3d::Entity& entity, const ge3d::Entity& frameStart);
     void applyHeightBrush(const Hit& hit, float seconds);
+    // Agua: simulación por terreno (caudales y chunks despiertos), no se guarda.
+    ge3d::WaterSimulation& waterSimulation(ge3d::EntityId entity) { return water_[entity]; }
+    void simulateWater(float seconds);
+    void editWater(ge3d::Entity& entity, const char* label, bool fill, float level);
     void drawStylePopup();
     void handleTerrainTool(ImDrawList* draw, ImVec2 origin, ImVec2 size, bool canUseMouse);
     void applyTerrainBrush(const Hit& hit);
@@ -245,6 +250,8 @@ private:
     int paintLayer_ = 0;                          // terreno de malla: capa que pinta el pincel
     float flattenLevel_ = 0.0f;                   // terreno de malla: altura local donde empezó Aplanar
     std::map<int, ge3d::Heightmap::Patch> heightBefore_;
+    std::vector<float> waterBefore_;              // agua de todo el terreno al empezar el trazo (fluye fuera del pincel)
+    std::map<ge3d::EntityId, ge3d::WaterSimulation> water_;
     ge3d::HeightmapSettings newHeightmap_{};
     ge3d::HeightmapSettings heightDraft_{};
     ge3d::EntityId heightDraftOwner_{};

@@ -20,16 +20,18 @@ inline constexpr float modeGrid = 1.0f;
 inline constexpr float modePiece = 2.0f;
 inline constexpr float modeVoxel = 3.0f;
 inline constexpr float modeHeightmap = 4.0f;
+inline constexpr float modeWater = 5.0f;
 inline constexpr VkShaderStageFlags pushStages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
 // Debe coincidir con FrameData en shaders/scene.slang.
 struct FrameData {
     glm::mat4 viewProj{1.0f};
     glm::vec4 sun{0.0f, 1.0f, 0.0f, 0.0f};
-    glm::vec4 style{0.0f, 16.0f, 0.0f, 0.0f};   // x bandas de luz (0 = continua), y texeles por repetición
+    glm::vec4 style{0.0f, 16.0f, 0.0f, 0.0f};   // x bandas de luz (0 = continua), y texeles por repetición, z tiempo
+    glm::vec4 camera{0.0f};                     // xyz posición de la cámara
     std::array<GpuMaterial, 256> materials{};
 };
-static_assert(sizeof(FrameData) == 64 + 16 + 16 + 256 * 16, "FrameData no coincide con el shader");
+static_assert(sizeof(FrameData) == 64 + 16 + 16 + 16 + 256 * 16, "FrameData no coincide con el shader");
 
 // Debe coincidir con PostPush en shaders/post.slang.
 struct PostPush {

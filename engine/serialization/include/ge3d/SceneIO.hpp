@@ -46,7 +46,8 @@ void saveSceneFile(const Scene& scene, const std::filesystem::path& path);
 
 // Terreno de malla: { "format": "ge3d.heightmap", "version": 1, "chunks": [x, z], "heights": base64,
 // "weights": base64 }. heights: int16 little endian en 1/64 m por vértice (filas de z); weights: 4 bytes
-// por vértice (peso de cada capa). Se guarda en terrains/<uuid>.heightmap.json junto a la escena.
+// por vértice (peso de cada capa); "water" (opcional): profundidad del agua, uint16 en 1/64 m.
+// Se guarda en terrains/<uuid>.heightmap.json junto a la escena.
 [[nodiscard]] std::string serializeHeightmap(const Heightmap& map);
 [[nodiscard]] std::shared_ptr<Heightmap> parseHeightmap(std::string_view json);
 [[nodiscard]] std::string heightmapDataPath(const Entity& entity);

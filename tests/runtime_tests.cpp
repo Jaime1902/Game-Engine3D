@@ -427,6 +427,59 @@ void testHeightmap() {
     expect(component && component->settings == settings && component->data, "el componente de terreno de malla se guarda en la escena");
 }
 
+// Agua: el volumen se conserva, baja por la pendiente, llena un hoyo, cruza chunks y se guarda.
+void testWater() {
+    ge3d::HeightmapSettings settings;
+    settings.chunksX = 2;
+    settings.chunksZ = 1;
+    settings.generator.water = false;
+    auto map = ge3d::makeFlatHeightmap(settings, 0.0f);
+    // Pendiente hacia +x y un hoyo en el chunk de la derecha.
+    for (int z = 0; z < map->verticesZ(); ++z) {
+        for (int x = 0; x < map->verticesX(); ++x) {
+            float height = 4.0f - static_cast<float>(x) * 0.05f;
+            if (std::hypot(static_cast<float>(x - 100), static_cast<float>(z - 32)) < 6.0f) height -= 3.0f;
+            map->setHeight(x, z, height);
+        }
+    }
+    const auto volume = [&] {
+        double total = 0.0;
+        for (const float depth : map->allWater()) total += depth;
+        return total;
+    };
+    for (int z = 28; z <= 36; ++z) {
+        for (int x = 8; x <= 16; ++x) map->setWater(x, z, 1.0f);
+    }
+    const double before = volume();
+    ge3d::WaterSimulation simulation;
+    simulation.wake(*map, 0);
+    simulation.settle(*map, settings.cellSize, 4000.0);
+    expect(std::abs(volume() - before) < before * 1e-3, "la simulacion conserva el volumen de agua");
+    expect(map->water(10, 32) < 0.05f, "el agua baja de la ladera");
+    expect(map->water(100, 32) > 0.3f, "el agua llena el hoyo del chunk vecino");
+    expect(simulation.awakeChunks() == 0, "el agua quieta duerme sus chunks");
+
+    // Generar con mar: agua hasta el nivel y arena en la orilla.
+    ge3d::HeightmapSettings sea;
+    sea.chunksX = 1;
+    sea.chunksZ = 1;
+    sea.generator.waterLevel = 0.0f;
+    const auto generated = ge3d::generateHeightmap(sea);
+    bool levelOk = true, any = false;
+    for (int z = 0; z < generated->verticesZ(); ++z) {
+        for (int x = 0; x < generated->verticesX(); ++x) {
+            const float depth = generated->water(x, z);
+            if (depth > 0.0f) {
+                any = true;
+                levelOk = levelOk && std::abs(generated->height(x, z) + depth) < 1e-3f;
+            }
+        }
+    }
+    expect(any && levelOk, "el mar llena hasta el nivel del agua");
+    const auto parsed = ge3d::parseHeightmap(ge3d::serializeHeightmap(*map));
+    expect(std::abs(parsed->water(100, 32) - map->water(100, 32)) < 1.0f / 64.0f, "el agua se guarda y se recupera");
+}
+
 void testFiles() {
     namespace fs = std::filesystem;
     const auto folder = fs::temp_directory_path() / ("ge3d_tests_" + ge3d::Uuid::generate().toString());
@@ -495,6 +548,7 @@ int main() {
     testTerrainHistory();
     testMaterialsAndImages();
     testHeightmap();
+    testWater();
     testFiles();
     if (failures > 0) {
         std::cerr << failures << " comprobaciones fallidas\n";

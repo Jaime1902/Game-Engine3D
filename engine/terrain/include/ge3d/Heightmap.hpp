@@ -29,6 +29,7 @@ public:
     struct Patch {
         std::vector<float> heights;
         std::vector<Weights> weights;
+        std::vector<float> water;
         friend bool operator==(const Patch&, const Patch&) = default;
     };
 
@@ -49,6 +50,18 @@ public:
     // Devuelven true si cambió. Marcan para remallar los chunks que usan el vértice (y sus normales).
     bool setHeight(int x, int z, float height);
     bool setWeights(int x, int z, Weights weights);
+
+    // Agua: profundidad en metros sobre el terreno en cada vértice (0 = seco). La superficie del agua
+    // es altura + profundidad. Tiene su propia revisión para no remallar el terreno cuando solo fluye.
+    [[nodiscard]] float water(int x, int z) const noexcept;
+    bool setWater(int x, int z, float depth);
+    [[nodiscard]] bool hasWater() const noexcept;
+    [[nodiscard]] bool chunkHasWater(int chunk) const noexcept;
+    [[nodiscard]] std::uint64_t chunkWaterRevision(int chunk) const noexcept { return waterRevisions_[static_cast<std::size_t>(chunk)]; }
+    [[nodiscard]] const std::vector<float>& allWater() const noexcept { return water_; }
+    // Acceso directo para la simulación: escribe sin marcar y luego llama a touchWaterChunk por chunk.
+    [[nodiscard]] std::vector<float>& waterData() noexcept { return water_; }
+    void touchWaterChunk(int chunk) noexcept;
 
     // Altura de la superficie en coordenadas de celda (x, z continuos), con la misma triangulación
     // que la malla: cada celda se parte por la diagonal (0,0)-(1,1).
@@ -72,12 +85,15 @@ private:
         return static_cast<std::size_t>(z) * static_cast<std::size_t>(verticesX()) + static_cast<std::size_t>(x);
     }
     void touchVertex(int x, int z) noexcept;
+    void touchWaterVertex(int x, int z) noexcept;
 
     int chunksX_;
     int chunksZ_;
     std::vector<float> heights_;
     std::vector<Weights> weights_;
+    std::vector<float> water_;
     std::vector<std::uint64_t> revisions_;
+    std::vector<std::uint64_t> waterRevisions_;
 };
 
 [[nodiscard]] constexpr std::uint8_t layerWeight(Heightmap::Weights weights, int layer) noexcept {
@@ -98,6 +114,8 @@ struct HeightmapGenerator {
     float scale{56.0f};         // metros por periodo del ruido: más alto = colinas más anchas
     int octaves{4};
     float rockSlope{0.45f};     // pendiente (0 llano, 1 vertical) a partir de la que aparece la roca; 0 = no pintar
+    bool water{true};           // llenar de agua lo que quede por debajo de waterLevel (mar y lagos)
+    float waterLevel{-3.0f};    // metros; la arena (capa 4) aparece en la orilla
     friend bool operator==(const HeightmapGenerator&, const HeightmapGenerator&) = default;
 };
 
@@ -108,6 +126,7 @@ struct HeightmapSettings {
     // Capa 0 = base. Por defecto: césped, tierra, roca y arena.
     std::array<std::string, Heightmap::layerCount> layers{"cesped", "tierra", "piedra", "arena"};
     HeightmapGenerator generator{};
+    std::string waterMaterial{"agua"};
     friend bool operator==(const HeightmapSettings&, const HeightmapSettings&) = default;
 };
 
@@ -129,5 +148,45 @@ struct HeightVertex {
 // (heightmapChunkIndices) y siguen la diagonal de surfaceHeight.
 [[nodiscard]] std::vector<HeightVertex> meshHeightChunk(const Heightmap& map, int chunk, float cellSize);
 [[nodiscard]] std::vector<std::uint32_t> heightmapChunkIndices();
+
+// Vértice de la superficie del agua (16 bytes), con los mismos índices que el terreno.
+struct WaterVertex {
+    float surface;              // altura de la superficie; en vértices secos, un poco bajo el terreno
+    float depth;                // profundidad (0 = seco): color, espuma y transparencia
+    std::uint32_t normal;       // como HeightVertex
+    std::uint32_t cell;         // x | z << 16, relativos al chunk
+};
+[[nodiscard]] std::vector<WaterVertex> meshWaterChunk(const Heightmap& map, int chunk, float cellSize);
+
+// --- Simulación de agua -------------------------------------------------------------------------
+
+// Aguas poco profundas con el modelo de "tuberías virtuales": cada vértice intercambia agua con sus
+// 4 vecinos según la diferencia de altura de la superficie, así el agua baja por las pendientes,
+// llena los hoyos y se nivela. Se conserva el volumen; los bordes del terreno son paredes.
+// Solo se calculan los chunks despiertos: un chunk se duerme cuando su agua deja de moverse y se
+// despierta cuando le llega agua de un vecino o se edita.
+class WaterSimulation {
+public:
+    // Avanza el tiempo indicado (en pasos estables). Devuelve true si queda agua en movimiento.
+    bool advance(Heightmap& map, float cellSize, float seconds);
+    // Avanza hasta que todo se quede quieto o se agote el tiempo de CPU (milisegundos).
+    void settle(Heightmap& map, float cellSize, double budgetMs);
+    void wake(const Heightmap& map, int chunk);
+    void wakeAll(const Heightmap& map);
+    void wakeAround(const Heightmap& map, int x, int z, int radius);
+    [[nodiscard]] int awakeChunks() const noexcept;
+    void reset() noexcept;
+
+private:
+    void prepare(const Heightmap& map);
+    void step(Heightmap& map, float cellSize, float dt);
+
+    const Heightmap* map_{};
+    int verticesX_{};
+    int verticesZ_{};
+    std::vector<float> left_, right_, down_, up_;   // caudal hacia -x, +x, -z, +z
+    std::vector<std::uint8_t> awake_;
+    std::vector<int> quiet_;                         // pasos seguidos sin movimiento por chunk
+};
 
 }

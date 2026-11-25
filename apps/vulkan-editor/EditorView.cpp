@@ -684,9 +684,47 @@ void EditorView::applyHeightBrush(const Hit& hit, float seconds) {
             case TerrainBrush::paint:
                 map.setWeights(x, z, ge3d::blendTowardLayer(map.weights(x, z), paintLayer_, blend * falloff));
                 break;
+            case TerrainBrush::water: {
+                // Echar agua (Shift: quitarla). La simulación la reparte cuesta abajo.
+                const float amount = rate * falloff * (ImGui::GetIO().KeyShift ? -1.5f : 1.0f);
+                map.setWater(x, z, std::max(0.0f, map.water(x, z) + amount));
+                break;
+            }
             }
         }
     }
+    // El agua alrededor del pincel vuelve a moverse (fluye hacia lo excavado o se aparta de lo elevado).
+    auto& simulation = waterSimulation(entity->id);
+    simulation.wakeAround(map, static_cast<int>(cx), static_cast<int>(cz), terrainRadius_ + 2);
+    if (!isPlaying()) simulation.advance(map, cell, seconds);
+}
+
+void EditorView::simulateWater(float seconds) {
+    for (auto& entity : scene_.entities()) {
+        if (!entity.heightmap || !entity.heightmap->data) continue;
+        auto* target = scene_.find(entity.id);
+        waterSimulation(entity.id).advance(*target->heightmap->data, target->heightmap->settings.cellSize, seconds);
+    }
+}
+
+void EditorView::editWater(ge3d::Entity& entity, const char* label, bool fill, float level) {
+    auto& map = *entity.heightmap->data;
+    ge3d::EditCommand command;
+    command.label = label;
+    for (int chunk = 0; chunk < map.chunkCount(); ++chunk) {
+        auto before = map.chunkData(chunk);
+        const auto [cx, cz] = map.chunkCoords(chunk);
+        for (int z = 0; z < ge3d::Heightmap::chunkVertices; ++z) {
+            for (int x = 0; x < ge3d::Heightmap::chunkVertices; ++x) {
+                const int gx = cx * ge3d::Heightmap::chunkCells + x, gz = cz * ge3d::Heightmap::chunkCells + z;
+                map.setWater(gx, gz, fill ? std::max(0.0f, level - map.height(gx, gz)) : 0.0f);
+            }
+        }
+        auto after = map.chunkData(chunk);
+        if (after != before) command.heightmapChanges.push_back({entity.id, chunk, std::move(before), std::move(after)});
+    }
+    waterSimulation(entity.id).reset();
+    activeHistory().record(std::move(command));
 }
 
 void EditorView::createTerrain() {
@@ -767,9 +805,32 @@ void EditorView::finishSculpt() {
     const auto* entity = scene_.find(sculptTarget_);
     if (entity && entity->heightmap && entity->heightmap->data && !heightBefore_.empty()) {
         static constexpr const char* labels[] = {"Elevar terreno", "Bajar terreno", "Pintar terreno", "Aplanar terreno",
-                                                 "Suavizar terreno"};
+                                                 "Suavizar terreno", "Agua"};
         ge3d::EditCommand command;
         command.label = labels[static_cast<int>(terrainBrush_)];
+        auto& map = *entity->heightmap->data;
+        if (!isPlaying() && !waterBefore_.empty()) {
+            // El agua termina de asentarse ahora para que el trazo entero (con su caudal) se deshaga de una vez.
+            waterSimulation(entity->id).settle(map, entity->heightmap->settings.cellSize, 400.0);
+            constexpr int size = ge3d::Heightmap::chunkCells;
+            for (int chunk = 0; chunk < map.chunkCount(); ++chunk) {
+                if (heightBefore_.contains(chunk)) continue;
+                const auto [cx, cz] = map.chunkCoords(chunk);
+                auto before = map.chunkData(chunk);
+                bool changed = false;
+                for (int z = 0; z < ge3d::Heightmap::chunkVertices; ++z) {
+                    for (int x = 0; x < ge3d::Heightmap::chunkVertices; ++x) {
+                        const auto index = static_cast<std::size_t>(cz * size + z) * static_cast<std::size_t>(map.verticesX()) +
+                                           static_cast<std::size_t>(cx * size + x);
+                        auto& depth = before.water[static_cast<std::size_t>(z * ge3d::Heightmap::chunkVertices + x)];
+                        changed = changed || depth != waterBefore_[index];
+                        depth = waterBefore_[index];
+                    }
+                }
+                if (changed) heightBefore_.emplace(chunk, std::move(before));
+            }
+        }
+        waterBefore_.clear();
         for (auto& [chunk, before] : heightBefore_) {
             auto after = entity->heightmap->data->chunkData(chunk);
             if (after != before) command.heightmapChanges.push_back({entity->id, chunk, std::move(before), std::move(after)});
@@ -803,7 +864,7 @@ void EditorView::handleTerrainTool(ImDrawList* draw, ImVec2 origin, ImVec2 size,
     // Vista previa: círculo del pincel sobre la superficie (en el terreno de malla, pegado al relieve).
     const glm::mat4 clip = projection() * view();
     const ImU32 colors[] = {IM_COL32(120, 230, 120, 230), IM_COL32(255, 100, 90, 230), IM_COL32(255, 255, 255, 230),
-                            IM_COL32(250, 210, 90, 230), IM_COL32(120, 200, 255, 230)};
+                            IM_COL32(250, 210, 90, 230), IM_COL32(120, 200, 255, 230), IM_COL32(80, 160, 255, 230)};
     ImVec2 ring[49];
     int points = 0;
     const auto project = [&](const glm::vec3& world) {
@@ -842,6 +903,10 @@ void EditorView::handleTerrainTool(ImDrawList* draw, ImVec2 origin, ImVec2 size,
         selected_ = hit->entity;
         sculptBefore_.clear();
         heightBefore_.clear();
+        waterBefore_.clear();
+        if (hit->heightmap && (terrainBrush_ == TerrainBrush::water || entity->heightmap->data->hasWater())) {
+            waterBefore_ = entity->heightmap->data->allWater();
+        }
         flattenHeight_ = hit->voxel.y;
         flattenLevel_ = glm::vec3(glm::inverse(modelMatrix(entity->transform)) * glm::vec4(hit->point, 1.0f)).y;
         lastSculptTime_ = -1.0;
@@ -974,6 +1039,7 @@ void EditorView::drawHeightmapComponent(ge3d::Entity& entity, const ge3d::Entity
     }
     auto& draft = heightDraft_;
     draft.layers = terrain.settings.layers;   // las capas se aplican al momento, no forman parte del borrador
+    draft.waterMaterial = terrain.settings.waterMaterial;
     const float labelWidth = std::max(70.0f, ImGui::GetContentRegionAvail().x * 0.38f);
     const auto row = [&](const char* label) {
         ImGui::AlignTextToFramePadding();
@@ -1028,6 +1094,44 @@ void EditorView::drawHeightmapComponent(ge3d::Entity& entity, const ge3d::Entity
     ImGui::SliderInt("##octavas", &draft.generator.octaves, 1, 8);
     row("Roca en pendientes");
     ImGui::SliderFloat("##roca", &draft.generator.rockSlope, 0.0f, 1.0f, draft.generator.rockSlope > 0 ? "%.2f" : "no pintar");
+
+    ImGui::SeparatorText("Agua");
+    row("Mar y lagos");
+    ImGui::Checkbox("##mar", &draft.generator.water);
+    ImGui::SetItemTooltip("Al generar, se llena de agua todo lo que quede por debajo del nivel");
+    row("Nivel del agua");
+    ImGui::SliderFloat("##nivel", &draft.generator.waterLevel, -40.0f, 40.0f, "%.1f m");
+    {
+        auto& material = terrain.settings.waterMaterial;
+        ImGui::PushID("agua");
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Textura");
+        ImGui::SameLine(labelWidth);
+        if (materialSwatch("##muestra", material, false, ImGui::GetFrameHeight() - 2)) ImGui::OpenPopup("materiales");
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", materialName(material));
+        if (ImGui::BeginPopup("materiales")) {
+            auto chosen = material;
+            if (materialPicker(chosen, ImGui::GetFrameHeight() * 1.4f, 6)) {
+                std::optional<ge3d::Entity> before = frameStart;
+                material = chosen;
+                commitModification(before, "Cambiar textura del agua");
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+        ImGui::PopID();
+    }
+    if (terrain.data) {
+        const float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) / 2;
+        if (ImGui::Button("Llenar hasta el nivel", {half, 0})) {
+            editWater(entity, "Llenar de agua", true, draft.generator.waterLevel);
+        }
+        ImGui::SetItemTooltip("Pone agua en todo lo que queda por debajo del nivel (sin regenerar el relieve)");
+        ImGui::SameLine();
+        if (ImGui::Button("Vaciar agua", {half, 0})) editWater(entity, "Vaciar agua", false, 0.0f);
+        ImGui::TextDisabled("Pincel Agua (T) para echar agua; en Play fluye sola");
+    }
 
     ImGui::SeparatorText("Tamano");
     row("Chunks X / Z");
@@ -1114,6 +1218,11 @@ EditorView::GridView EditorView::gridView() const {
     // A 320 x 180 las líneas lejanas se convierten en ruido: se desvanecen antes.
     const float fadeRadius = std::max(12.0f, distance_ * 2.2f);
     return {offset, focus, spacing, fadeRadius};
+}
+
+glm::vec3 EditorView::cameraPosition() const {
+    const glm::vec3 orbit{std::sin(yaw_) * std::cos(pitch_), std::sin(pitch_), std::cos(yaw_) * std::cos(pitch_)};
+    return pivot_ + orbit * distance_;
 }
 
 EditorView::SceneView EditorView::sceneView() const {
@@ -1524,10 +1633,16 @@ void EditorView::togglePlay() {
         playHistory_.clear();
         paused_ = false;
         playFrames_ = 0;
+        // El agua de la copia empieza despierta: si no estaba en reposo, fluye.
+        water_.clear();
+        for (const auto& entity : scene_.entities()) {
+            if (entity.heightmap && entity.heightmap->data) waterSimulation(entity.id).wakeAll(*entity.heightmap->data);
+        }
         log("Play: los cambios que hagas ahora se descartan al detener");
     } else {
         scene_ = std::move(*playSnapshot_);
         playSnapshot_.reset();
+        water_.clear();
         playHistory_.clear();
         paused_ = false;
         gizmoEdit_.reset();
@@ -1543,7 +1658,10 @@ void EditorView::togglePause() {
 }
 
 void EditorView::step() {
-    if (isPlaying() && paused_) ++playFrames_;
+    if (isPlaying() && paused_) {
+        ++playFrames_;
+        simulateWater(1.0f / 60.0f);
+    }
 }
 
 // --- Escena y archivos -------------------------------------------------------------------------
@@ -2261,12 +2379,13 @@ void EditorView::drawViewport(ImTextureID sceneTexture) {
             if (tool_ == Tool::terrain) {
                 // Pinceles del terreno.
                 ImGui::SameLine(0, 16 * scale_);
-                static constexpr const char* brushes[] = {"Elevar", "Bajar", "Pintar", "Aplanar", "Suavizar"};
+                static constexpr const char* brushes[] = {"Elevar", "Bajar", "Pintar", "Aplanar", "Suavizar", "Agua"};
                 static constexpr const char* brushTips[] = {
                     "Sube el terreno (en voxeles, anade del material elegido)", "Baja el terreno (en voxeles, excava)",
                     "Pinta la capa elegida (en voxeles, el material)", "Nivela a la altura donde empieza el trazo",
-                    "Suaviza el relieve (solo terreno de malla)"};
-                for (int i = 0; i < 5; ++i) {
+                    "Suaviza el relieve (solo terreno de malla)",
+                    "Echa agua, que corre cuesta abajo y llena los hoyos (Shift: quitar agua). Solo terreno de malla"};
+                for (int i = 0; i < 6; ++i) {
                     if (i) ImGui::SameLine(0, 2);
                     if (toggleButton(brushes[i], static_cast<int>(terrainBrush_) == i, brushTips[i])) {
                         terrainBrush_ = static_cast<TerrainBrush>(i);
@@ -2608,7 +2727,10 @@ void EditorView::buildDefaultLayout(ImGuiID dock) {
 }
 
 void EditorView::draw(ImTextureID sceneTexture) {
-    if (isPlaying() && !paused_) ++playFrames_;
+    if (isPlaying() && !paused_) {
+        ++playFrames_;
+        simulateWater(std::min(ImGui::GetIO().DeltaTime, 1.0f / 20.0f));
+    }
 
     // En modo Play todo el editor se tiñe para que no se confunda con la edición normal.
     const int tinted = isPlaying() ? 3 : 0;

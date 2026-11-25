@@ -8,9 +8,10 @@
 //   model  matriz del objeto (vóxeles: transformación del terreno * tamaño del vóxel)
 //   fade   cuadrícula: xy centro del desvanecimiento en coordenadas locales, z radio
 //   grid   cuadrícula: xy desplazamiento en el mundo, z separación;  w = modo
-//          (1 cuadrícula, 2 pieza, 3 vóxeles, 4 terreno de malla)
+//          (1 cuadrícula, 2 pieza, 3 vóxeles, 4 terreno de malla, 5 agua)
 //   data   pieza: 6 materiales de 16 bits empaquetados en x, y, z;  vóxeles: origen del chunk (x, y, z)
 //          terreno de malla: xy origen del chunk en celdas, zw materiales de las 4 capas (16 bits cada uno)
+//          agua: xy origen del chunk en celdas, z material del agua
 //   extra  x > 0: resaltar (mezcla con blanco);  y: metros por celda del terreno de malla
 //
 // Salidas: color y normal del mundo (para los contornos de la pasada de post). normal.a = 0 en lo que
@@ -26,7 +27,8 @@ struct GpuMaterial {
 struct FrameData {
     float4x4 viewProj;
     float4 sun;        // xyz dirección hacia el sol (normalizada)
-    float4 style;      // x bandas de luz (0 = continua), y texeles por repetición de textura
+    float4 style;      // x bandas de luz (0 = continua), y texeles por repetición de textura, z tiempo (s)
+    float4 camera;     // xyz posición de la cámara en el mundo
     GpuMaterial materials[256];
 };
 
@@ -64,13 +66,21 @@ struct HeightVertex {
     [[vk::location(3)]] uint cell : TEXCOORD;      // x | z << 16 dentro del chunk
 };
 
+struct WaterVertex {
+    [[vk::location(0)]] float surface : POSITION;
+    [[vk::location(1)]] float depth : TEXCOORD0;
+    [[vk::location(2)]] uint normal : NORMAL;
+    [[vk::location(3)]] uint cell : TEXCOORD1;
+};
+
 struct Pixel {
     float4 position : SV_Position;
-    float4 color : COLOR;          // rgb tinte (o color plano); w: 0 plano, 1 con textura, 2 terreno de malla
+    float4 color : COLOR;          // rgb tinte (o color plano); w: 0 plano, 1 con textura, 2 terreno de malla, 3 agua
     float3 texcoord : TEXCOORD0;   // uv en repeticiones de textura y capa del array
     float2 local : TEXCOORD1;      // cuadrícula: coordenadas locales xz
     float3 normal : TEXCOORD2;     // normal del mundo
-    float4 weights : TEXCOORD3;    // terreno de malla: pesos de las capas
+    float4 weights : TEXCOORD3;    // terreno de malla: pesos de las capas;  agua: x profundidad
+    float3 world : TEXCOORD5;      // posición en el mundo
     float3 meters : TEXCOORD4;     // terreno de malla: posición local en metros (para las UV)
 };
 
@@ -112,6 +122,7 @@ Pixel emptyPixel() {
     output.normal = float3(0.0, 1.0, 0.0);
     output.weights = float4(1.0, 0.0, 0.0, 0.0);
     output.meters = float3(0.0, 0.0, 0.0);
+    output.world = float3(0.0, 0.0, 0.0);
     return output;
 }
 
@@ -191,6 +202,25 @@ Pixel heightVertexMain(HeightVertex input) {
     return output;
 }
 
+float3 unpackNormal(uint packed) {
+    return float3(float(packed & 1023u), float((packed >> 10) & 1023u), float((packed >> 20) & 1023u)) / 1023.0 * 2.0 - 1.0;
+}
+
+Pixel waterVertexMain(WaterVertex input) {
+    Pixel output = emptyPixel();
+    float cellSize = scene.extra.y;
+    float2 cell = float2(float(input.cell & 0xFFFFu), float(input.cell >> 16)) + float2(scene.data.xy);
+    float3 meters = float3(cell.x * cellSize, input.surface, cell.y * cellSize);
+    float4 world = mul(scene.model, float4(meters, 1.0));
+    output.position = mul(frame.viewProj, world);
+    output.normal = worldNormalOf(unpackNormal(input.normal));
+    output.weights = float4(input.depth, 0.0, 0.0, 0.0);
+    output.meters = meters;
+    output.world = world.xyz;
+    output.color = float4(1.0, 1.0, 1.0, 3.0);
+    return output;
+}
+
 // Umbrales de tramado ordenado 4x4 (Bayer). Tramar en lugar de mezclar conserva píxeles nítidos
 // y colores sólidos, en lugar de mezclas semitransparentes que ensucian la paleta.
 static const float bayer[16] = {
@@ -221,7 +251,39 @@ Target fragmentMain(Pixel input) {
     float3 color = input.color.rgb;
     float3 normal = normalize(input.normal);
     float edge = 1.0;
-    if (input.color.w > 1.5) {
+    if (input.color.w > 2.5) {
+        // Agua pixel art: color por profundidad, oleaje cuantizado a la rejilla de la textura, brillos del
+        // sol en bandas, espuma en la orilla y transparencia tramada donde hay poca profundidad.
+        float depth = input.weights.x;
+        if (depth < 0.015) discard;
+        float texels = max(frame.style.y, 1.0);
+        float time = frame.style.z;
+        float2 p = floor(input.meters.xz * texels * 0.5) / (texels * 0.5);
+        float3 wave = float3(0.22 * cos(p.x * 0.9 + time * 1.3) + 0.12 * cos((p.x + p.y) * 1.7 - time * 1.9), 0.0,
+                             0.22 * sin(p.y * 0.8 + time * 1.1) + 0.12 * sin((p.x - p.y) * 1.5 + time * 1.6));
+        float3 waveNormal = normalize(normal + wave * 0.6);
+        GpuMaterial material = loadMaterial(scene.data.z);
+        float2 uv = input.meters.xz + float2(time * 0.06, time * 0.04);
+        float3 detail = textures.Sample(float3(uv, float(material.top))).rgb * unpackColor(material.tint);
+        float3 shallow = float3(0.30, 0.66, 0.74);
+        float3 deep = float3(0.07, 0.20, 0.42);
+        color = lerp(shallow, deep, saturate(depth / 3.0)) * lerp(float3(1.0, 1.0, 1.0), detail * 1.6, 0.35);
+        color *= lighting(waveNormal);
+        // Brillo del sol: reflejo cuantizado en dos niveles (píxeles blancos sueltos, como en el pixel art).
+        float3 view = normalize(frame.camera.xyz - input.world);
+        float glint = pow(saturate(dot(reflect(-frame.sun.xyz, waveNormal), view)), 24.0);
+        if (glint > 0.6) color = lerp(color, float3(1.0, 1.0, 0.95), 0.85);
+        else if (glint > 0.25) color = lerp(color, float3(1.0, 1.0, 0.95), 0.35);
+        // Espuma: franja en la orilla que avanza y retrocede con las olas.
+        float foam = 0.16 + 0.07 * sin(time * 2.2 + p.x * 1.3 + p.y * 0.7);
+        if (depth < foam) color = lerp(color, float3(0.92, 0.97, 1.0), 0.8);
+        // Poca profundidad: se ve el fondo a través de un tramado (sin mezclas semitransparentes).
+        float alpha = saturate(0.35 + depth * 0.9);
+        if (alpha < bayerThreshold(int2(input.position.xy))) discard;
+        // Sin contornos: el tramado y las olas los volverían ruido.
+        edge = 0.0;
+        normal = waveNormal;
+    } else if (input.color.w > 1.5) {
         // Terreno de malla: cada texel de la textura toma una sola capa según su peso, con un umbral
         // de tramado anclado a la textura (no a la pantalla): la transición no "nada" al mover la cámara.
         float2 uv = planarUv(input.meters, normal);

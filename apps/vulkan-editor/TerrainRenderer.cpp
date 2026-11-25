@@ -135,9 +135,11 @@ void TerrainRenderer::releaseTerrain(TerrainGpu& terrain, std::uint64_t frame) {
 }
 
 void TerrainRenderer::releaseHeightmap(HeightmapGpu& terrain, std::uint64_t frame) {
-    for (auto& chunk : terrain.chunks) {
-        pool_.release(chunk.allocation, frame);
-        chunk = {};
+    for (auto* chunks : {&terrain.chunks, &terrain.water}) {
+        for (auto& chunk : *chunks) {
+            pool_.release(chunk.allocation, frame);
+            chunk = {};
+        }
     }
 }
 
@@ -236,10 +238,12 @@ void TerrainRenderer::update(VkCommandBuffer command, int frameSlot, std::uint64
             releaseHeightmap(terrain, frameNumber);
             terrain.map = &map;
             terrain.chunks.assign(static_cast<std::size_t>(map.chunkCount()), {});
+            terrain.water.assign(static_cast<std::size_t>(map.chunkCount()), {});
         }
         // Las normales dependen del tamaño de la celda: si cambia, se remalla todo.
         if (terrain.cellSize != cellSize) {
             for (auto& chunk : terrain.chunks) chunk.revision = ~0ull;
+            for (auto& chunk : terrain.water) chunk.revision = ~0ull;
             terrain.cellSize = cellSize;
         }
         constexpr std::size_t cellsPerChunk = ge3d::Heightmap::chunkCells * ge3d::Heightmap::chunkCells;
@@ -270,6 +274,38 @@ void TerrainRenderer::update(VkCommandBuffer command, int frameSlot, std::uint64
             chunk.revision = map.chunkRevision(index);
             chunk.low = range[0];
             chunk.high = range[1];
+        }
+        // Agua: chunks con agua, remallados cuando cambia su revisión de agua (o el terreno debajo).
+        for (int index = 0; index < map.chunkCount(); ++index) {
+            auto& chunk = terrain.water[static_cast<std::size_t>(index)];
+            const std::uint64_t revision = map.chunkWaterRevision(index) ^ (map.chunkRevision(index) << 1);
+            if (chunk.revision == revision) continue;
+            if (!map.chunkHasWater(index)) {
+                pool_.release(chunk.allocation, frameNumber);
+                chunk = {};
+                chunk.revision = revision;
+                continue;
+            }
+            if (outOfBudget || std::chrono::steady_clock::now() - start > timeBudget || stagingUsed + bytes > stagingPerFrame) {
+                outOfBudget = true;
+                ++stats_.pendingChunks;
+                continue;
+            }
+            const auto vertices = ge3d::meshWaterChunk(map, index, cellSize);
+            float low = ge3d::Heightmap::maxHeight, high = -ge3d::Heightmap::maxHeight;
+            for (const auto& vertex : vertices) {
+                low = std::min(low, vertex.surface);
+                high = std::max(high, vertex.surface);
+            }
+            pool_.release(chunk.allocation, frameNumber);
+            chunk.allocation = pool_.allocate(bytes);
+            if (!chunk.allocation.valid()) continue;
+            std::memcpy(static_cast<std::uint8_t*>(staging_.mapped) + stagingBase + stagingUsed, vertices.data(), bytes);
+            copies.push_back({pool_.buffer(chunk.allocation.page), {stagingBase + stagingUsed, chunk.allocation.offset, bytes}});
+            stagingUsed += (bytes + 15) & ~VkDeviceSize{15};
+            chunk.revision = revision;
+            chunk.low = low;
+            chunk.high = high + 0.5f;   // las olas suben un poco
         }
     }
     for (auto it = heightmaps_.begin(); it != heightmaps_.end();) {
@@ -406,6 +442,48 @@ void TerrainRenderer::drawHeightmaps(VkCommandBuffer command, VkPipelineLayout l
                              static_cast<std::int32_t>(chunk.allocation.offset / sizeof(ge3d::HeightVertex)), 0);
             ++stats_.visibleChunks;
             stats_.visibleQuads += static_cast<std::size_t>(ge3d::Heightmap::chunkCells * ge3d::Heightmap::chunkCells);
+        }
+    }
+}
+
+void TerrainRenderer::drawWater(VkCommandBuffer command, VkPipelineLayout layout, const glm::mat4& viewProj, const ge3d::Scene& scene,
+                                const std::function<glm::mat4(const ge3d::Transform&)>& modelMatrix, const MaterialLookup& lookup) {
+    static_assert(sizeof(ge3d::WaterVertex) == sizeof(ge3d::HeightVertex), "el agua usa el mismo tamano de chunk que el terreno");
+    vkCmdBindIndexBuffer(command, heightIndices_.handle, 0, VK_INDEX_TYPE_UINT32);
+    int boundPage = -1;
+    constexpr float chunkCells = static_cast<float>(ge3d::Heightmap::chunkCells);
+    for (const auto& entity : scene.entities()) {
+        if (!entity.heightmap || !entity.heightmap->data) continue;
+        const auto found = heightmaps_.find(entity.id);
+        if (found == heightmaps_.end() || found->second.map != entity.heightmap->data.get()) continue;
+        const auto& terrain = found->second;
+        const auto& settings = entity.heightmap->settings;
+        const glm::mat4 model = modelMatrix(entity.transform);
+        const glm::mat4 clipFromModel = viewProj * model;
+        const std::uint32_t material = lookup(settings.waterMaterial) & 0xFFFFu;
+        for (int index = 0; index < static_cast<int>(terrain.water.size()); ++index) {
+            const auto& chunk = terrain.water[static_cast<std::size_t>(index)];
+            if (!chunk.allocation.valid()) continue;
+            const auto coords = terrain.map->chunkCoords(index);
+            const glm::vec3 low{static_cast<float>(coords[0]) * chunkCells * settings.cellSize, chunk.low,
+                                static_cast<float>(coords[1]) * chunkCells * settings.cellSize};
+            const glm::vec3 high = low + glm::vec3{chunkCells * settings.cellSize, chunk.high - chunk.low, chunkCells * settings.cellSize};
+            if (outsideFrustum(clipFromModel, low, high)) continue;
+            if (chunk.allocation.page != boundPage) {
+                const VkBuffer buffer = pool_.buffer(chunk.allocation.page);
+                const VkDeviceSize offset = 0;
+                vkCmdBindVertexBuffers(command, 0, 1, &buffer, &offset);
+                boundPage = chunk.allocation.page;
+            }
+            ScenePush push;
+            push.model = model;
+            push.grid.w = modeWater;
+            push.data = {static_cast<std::uint32_t>(coords[0] * ge3d::Heightmap::chunkCells),
+                         static_cast<std::uint32_t>(coords[1] * ge3d::Heightmap::chunkCells), material, 0u};
+            push.extra.y = settings.cellSize;
+            vkCmdPushConstants(command, layout, pushStages, 0, sizeof(push), &push);
+            vkCmdDrawIndexed(command, heightIndexCount_, 1, 0,
+                             static_cast<std::int32_t>(chunk.allocation.offset / sizeof(ge3d::WaterVertex)), 0);
         }
     }
 }

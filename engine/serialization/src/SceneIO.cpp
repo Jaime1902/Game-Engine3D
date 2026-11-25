@@ -177,6 +177,15 @@ HeightmapSettings readHeightmapSettings(const Json& object, const std::string& w
     g.scale = static_cast<float>(readNumber(generator, "scale", at, 1, 4096));
     g.octaves = static_cast<int>(readInteger(generator, "octaves", at, 1, 8));
     g.rockSlope = static_cast<float>(readNumber(generator, "rockSlope", at, 0, 1));
+    // Agua (opcional: las primeras escenas v4 no la tenían).
+    if (generator.contains("water")) {
+        if (!generator["water"].is_boolean()) fail(at + ": \"water\" debe ser true o false");
+        g.water = generator["water"].get<bool>();
+    }
+    if (generator.contains("waterLevel")) {
+        g.waterLevel = static_cast<float>(readNumber(generator, "waterLevel", at, -Heightmap::maxHeight, Heightmap::maxHeight));
+    }
+    if (object.contains("waterMaterial")) settings.waterMaterial = readMaterialId(object["waterMaterial"], where);
     return settings;
 }
 
@@ -189,12 +198,15 @@ Json heightmapJson(const Entity& entity) {
     generator["scale"] = tidy(g.scale);
     generator["octaves"] = g.octaves;
     generator["rockSlope"] = tidy(g.rockSlope);
+    generator["water"] = g.water;
+    generator["waterLevel"] = tidy(g.waterLevel);
     Json layers = Json::array();
     for (const auto& layer : settings.layers) layers.push_back(layer);
     Json heightmap = Json::object();
     heightmap["chunks"] = Json::array({settings.chunksX, settings.chunksZ});
     heightmap["cellSize"] = tidy(settings.cellSize);
     heightmap["layers"] = std::move(layers);
+    heightmap["waterMaterial"] = settings.waterMaterial;
     heightmap["generator"] = std::move(generator);
     heightmap["data"] = heightmapDataPath(entity);
     return heightmap;
@@ -544,6 +556,17 @@ std::string serializeHeightmap(const Heightmap& map) {
     root["chunks"] = Json::array({map.chunksX(), map.chunksZ()});
     root["heights"] = encodeBase64(heights);
     root["weights"] = encodeBase64(weights);
+    if (map.hasWater()) {
+        // Profundidad del agua con la misma codificación que las alturas (solo si hay agua).
+        std::vector<std::uint8_t> water;
+        water.reserve(map.allWater().size() * 2);
+        for (const float depth : map.allWater()) {
+            const auto bits = static_cast<std::uint16_t>(std::clamp(std::lround(depth * heightmapUnits), 0L, 65535L));
+            water.push_back(static_cast<std::uint8_t>(bits & 0xFFu));
+            water.push_back(static_cast<std::uint8_t>(bits >> 8));
+        }
+        root["water"] = encodeBase64(water);
+    }
     return root.dump(2, ' ', false, Json::error_handler_t::replace) + "\n";
 }
 
@@ -566,6 +589,11 @@ std::shared_ptr<Heightmap> parseHeightmap(std::string_view text) {
     const auto weights = decodeBase64(readString(root, "weights", where), where + " (weights)");
     if (heights.size() != count * 2) fail(where + ": \"heights\" no tiene el tamano del terreno");
     if (weights.size() != count * 4) fail(where + ": \"weights\" no tiene el tamano del terreno");
+    std::vector<std::uint8_t> water;
+    if (root.contains("water")) {
+        water = decodeBase64(readString(root, "water", where), where + " (water)");
+        if (water.size() != count * 2) fail(where + ": \"water\" no tiene el tamano del terreno");
+    }
     for (int z = 0; z < map->verticesZ(); ++z) {
         for (int x = 0; x < map->verticesX(); ++x) {
             const auto index = static_cast<std::size_t>(z) * static_cast<std::size_t>(map->verticesX()) + static_cast<std::size_t>(x);
@@ -574,6 +602,10 @@ std::shared_ptr<Heightmap> parseHeightmap(std::string_view text) {
             Heightmap::Weights w = 0;
             for (std::size_t i = 0; i < 4; ++i) w |= static_cast<Heightmap::Weights>(weights[index * 4 + i]) << (i * 8);
             map->setWeights(x, z, w);
+            if (!water.empty()) {
+                const auto depth = static_cast<std::uint16_t>(water[index * 2] | (water[index * 2 + 1] << 8));
+                map->setWater(x, z, static_cast<float>(depth) / heightmapUnits);
+            }
         }
     }
     return map;

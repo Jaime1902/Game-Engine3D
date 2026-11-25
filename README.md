@@ -46,7 +46,7 @@ Con Pintar, Construir y Terreno, la barra de la vista muestra los materiales con
 | Orbitar / desplazar / acercar | Clic derecho o Alt + clic izquierdo / botón central / rueda |
 | Pintar (herramienta B) | Clic o arrastre: la cara bajo el cursor · Shift + clic: toda la pieza · Ctrl + clic: tomar el material (también de un vóxel) |
 | Construir (herramienta C) | Clic: una pieza en la celda · Arrastre: trazo · Shift + arrastre: rectángulo · Ctrl + arrastre: borrar piezas · Espacio: girar 90° |
-| Terreno (herramienta T) | Pinceles Elevar / Bajar / Pintar / Aplanar / Suavizar · mantener pulsado para seguir aplicando · **[** y **]**: radio |
+| Terreno (herramienta T) | Pinceles Elevar / Bajar / Pintar / Aplanar / Suavizar / Agua (Shift: quitar) · mantener pulsado para seguir aplicando · **[** y **]**: radio |
 | Enfocar selección | **F** |
 | Duplicar / eliminar | **Ctrl+D** / **Supr** |
 | Deshacer / rehacer | **Ctrl+Z** / **Ctrl+Y** |
@@ -85,6 +85,8 @@ Todo se ajusta en el botón **Estilo** de la barra de la vista. Con tamaño de p
 **Objeto → Terreno** (o **+** en la Jerarquía) crea un terreno de malla de 128 × 128 m: una rejilla de alturas suave que se modela con pinceles. Tiene 4 **capas** de material (por defecto césped, tierra, piedra y arena) que se pintan y se mezclan con tramado a nivel de texel; en las laderas el césped muestra su textura de abajo (tierra). En el Inspector se eligen las capas, la semilla, el relieve, la anchura de las colinas, la roca en pendientes y el tamaño (hasta 1.024 × 1.024 celdas de 0,25 a 2 m). **Generar** crea el relieve y **Plano** deja un terreno llano para modelarlo a mano.
 
 Con la herramienta **Terreno (T)** sobre un terreno de malla: **Elevar** y **Bajar** suben y bajan el relieve con caída suave, **Aplanar** nivela a la altura donde empieza el trazo, **Suavizar** redondea y **Pintar** aplica la capa elegida en la barra de la vista. **Fuerza** regula la velocidad.
+
+**Agua.** Al generar, todo lo que queda por debajo del **nivel del agua** se llena (mar y lagos, con playa de arena en la orilla). El pincel **Agua** echa agua (Shift: la quita) y una simulación de aguas poco profundas la hace correr cuesta abajo, llenar hoyos y nivelarse; al soltar el trazo el agua se asienta y todo se deshace de una vez. En Play el agua sigue fluyendo sola (por ejemplo, si excavas un canal). Se dibuja en pixel art: color según la profundidad, oleaje, brillos del sol, espuma en la orilla y fondo visible con tramado donde hay poca profundidad. **Llenar hasta el nivel** y **Vaciar agua** están en el Inspector.
 
 ### Terreno de vóxeles
 

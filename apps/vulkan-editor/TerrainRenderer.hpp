@@ -86,6 +86,9 @@ public:
     // Igual para los terrenos de malla, con su pipeline ya enlazado.
     void drawHeightmaps(VkCommandBuffer command, VkPipelineLayout layout, const glm::mat4& viewProj, const ge3d::Scene& scene,
                         const std::function<glm::mat4(const ge3d::Transform&)>& modelMatrix, const MaterialLookup& lookup);
+    // Superficie del agua de los terrenos de malla (después de todo lo opaco), con su pipeline enlazado.
+    void drawWater(VkCommandBuffer command, VkPipelineLayout layout, const glm::mat4& viewProj, const ge3d::Scene& scene,
+                   const std::function<glm::mat4(const ge3d::Transform&)>& modelMatrix, const MaterialLookup& lookup);
     [[nodiscard]] const TerrainStats& stats() const noexcept { return stats_; }
 
 private:
@@ -112,6 +115,7 @@ private:
         const ge3d::Heightmap* map{};
         float cellSize{};
         std::vector<HeightChunkGpu> chunks;
+        std::vector<HeightChunkGpu> water;
         bool seen{};
     };
     void releaseTerrain(TerrainGpu& terrain, std::uint64_t frame);

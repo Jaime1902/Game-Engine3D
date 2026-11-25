@@ -36,6 +36,7 @@ set(GE3D_SHADER_ENTRIES
     "scene|vertex|vertexMain|vertex"
     "scene|voxel|voxelVertexMain|vertex"
     "scene|height|heightVertexMain|vertex"
+    "scene|water|waterVertexMain|vertex"
     "scene|fragment|fragmentMain|fragment"
     "post|vertex|postVertexMain|vertex"
     "post|fragment|postFragmentMain|fragment"

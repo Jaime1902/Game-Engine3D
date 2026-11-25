@@ -275,12 +275,13 @@ void createBuffer(VmaAllocator allocator, VkDeviceSize size, VkBufferUsageFlags 
 
 // Pipelines de la escena: piezas (triángulos), cuadrícula (líneas), vóxeles (vértice compacto),
 // terreno de malla y la pasada de estilo pixel art (triángulo a pantalla completa, sin vértices).
-enum class PipelineKind { piece, grid, voxel, height, post };
+enum class PipelineKind { piece, grid, voxel, height, water, post };
 
 VkPipeline createScenePipeline(VkDevice device, VkPipelineLayout layout, PipelineKind kind) {
     const bool post = kind == PipelineKind::post;
     const char* vertexName = kind == PipelineKind::voxel ? "scene.voxel.spv"
                            : kind == PipelineKind::height ? "scene.height.spv"
+                           : kind == PipelineKind::water ? "scene.water.spv"
                            : post ? "post.vertex.spv" : "scene.vertex.spv";
     VkShaderModule vertex = createShaderModule(device, vertexName);
     VkShaderModule fragment = VK_NULL_HANDLE;
@@ -299,6 +300,7 @@ VkPipeline createScenePipeline(VkDevice device, VkPipelineLayout layout, Pipelin
         VkPipelineVertexInputStateCreateInfo vertexInput{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
         const std::uint32_t stride = kind == PipelineKind::voxel ? static_cast<std::uint32_t>(sizeof(ge3d::VoxelVertex))
                                    : kind == PipelineKind::height ? static_cast<std::uint32_t>(sizeof(ge3d::HeightVertex))
+                                   : kind == PipelineKind::water ? static_cast<std::uint32_t>(sizeof(ge3d::WaterVertex))
                                    : static_cast<std::uint32_t>(sizeof(Vertex));
         const VkVertexInputBindingDescription binding{0, stride, VK_VERTEX_INPUT_RATE_VERTEX};
         const VkVertexInputAttributeDescription attributes[] = {
@@ -313,12 +315,20 @@ VkPipeline createScenePipeline(VkDevice device, VkPipelineLayout layout, Pipelin
             {2, 0, VK_FORMAT_R8G8B8A8_UNORM, offsetof(ge3d::HeightVertex, weights)},
             {3, 0, VK_FORMAT_R32_UINT, offsetof(ge3d::HeightVertex, cell)}
         };
+        const VkVertexInputAttributeDescription waterAttributes[] = {
+            {0, 0, VK_FORMAT_R32_SFLOAT, offsetof(ge3d::WaterVertex, surface)},
+            {1, 0, VK_FORMAT_R32_SFLOAT, offsetof(ge3d::WaterVertex, depth)},
+            {2, 0, VK_FORMAT_R32_UINT, offsetof(ge3d::WaterVertex, normal)},
+            {3, 0, VK_FORMAT_R32_UINT, offsetof(ge3d::WaterVertex, cell)}
+        };
         if (!post) {
             vertexInput.vertexBindingDescriptionCount = 1;
             vertexInput.pVertexBindingDescriptions = &binding;
-            vertexInput.vertexAttributeDescriptionCount = kind == PipelineKind::voxel ? 1 : kind == PipelineKind::height ? 4 : 3;
+            vertexInput.vertexAttributeDescriptionCount = kind == PipelineKind::voxel ? 1
+                                                        : (kind == PipelineKind::height || kind == PipelineKind::water) ? 4 : 3;
             vertexInput.pVertexAttributeDescriptions = kind == PipelineKind::voxel ? &voxelAttribute
-                                                     : kind == PipelineKind::height ? heightAttributes : attributes;
+                                                     : kind == PipelineKind::height ? heightAttributes
+                                                     : kind == PipelineKind::water ? waterAttributes : attributes;
         }
         VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
         assembly.topology = kind == PipelineKind::grid ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -446,6 +456,7 @@ void run() {
     VkPipeline gridPipeline = VK_NULL_HANDLE;
     VkPipeline voxelPipeline = VK_NULL_HANDLE;
     VkPipeline heightPipeline = VK_NULL_HANDLE;
+    VkPipeline waterPipeline = VK_NULL_HANDLE;
     VkPipeline postPipeline = VK_NULL_HANDLE;
     VkPipelineLayout postLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout postSetLayout = VK_NULL_HANDLE;
@@ -507,6 +518,7 @@ void run() {
             if (sceneSetLayout) vkDestroyDescriptorSetLayout(device, sceneSetLayout, nullptr);
             if (voxelPipeline) vkDestroyPipeline(device, voxelPipeline, nullptr);
             if (heightPipeline) vkDestroyPipeline(device, heightPipeline, nullptr);
+            if (waterPipeline) vkDestroyPipeline(device, waterPipeline, nullptr);
             if (postPipeline) vkDestroyPipeline(device, postPipeline, nullptr);
             if (postLayout) vkDestroyPipelineLayout(device, postLayout, nullptr);
             if (postPool) vkDestroyDescriptorPool(device, postPool, nullptr);
@@ -670,6 +682,7 @@ void run() {
         gridPipeline = createScenePipeline(device, pipelineLayout, PipelineKind::grid);
         voxelPipeline = createScenePipeline(device, pipelineLayout, PipelineKind::voxel);
         heightPipeline = createScenePipeline(device, pipelineLayout, PipelineKind::height);
+        waterPipeline = createScenePipeline(device, pipelineLayout, PipelineKind::water);
 
         // Pasada de estilo: lee color, normal y profundidad de la escena.
         VkDescriptorSetLayoutBinding postBindings[3]{};
@@ -1120,7 +1133,9 @@ void run() {
             FrameData frameData;
             frameData.viewProj = camera;
             frameData.sun = glm::vec4(glm::normalize(glm::vec3{0.45f, 0.85f, 0.35f}), 0.0f);
-            frameData.style = {static_cast<float>(style.lightBands), static_cast<float>(std::max(1, textures.textureSize())), 0.0f, 0.0f};
+            frameData.style = {static_cast<float>(style.lightBands), static_cast<float>(std::max(1, textures.textureSize())),
+                               static_cast<float>(std::fmod(glfwGetTime(), 3600.0)), 0.0f};
+            frameData.camera = glm::vec4(editor.cameraPosition(), 1.0f);
             frameData.materials = textures.table();
             std::memcpy(frameUniforms[frame].mapped, &frameData, sizeof(frameData));
             check(vmaFlushAllocation(allocator, frameUniforms[frame].allocation, 0, VK_WHOLE_SIZE), "Flush frame data");
@@ -1191,6 +1206,11 @@ void run() {
             terrainRenderer.drawHeightmaps(command, pipelineLayout, camera, editor.scene(),
                                            [](const ge3d::Transform& transform) { return EditorView::modelMatrix(transform); },
                                            [&](const std::string& id) { return textures.gpuIndex(id); });
+            // Agua después de todo lo opaco: su tramado deja ver el fondo ya dibujado.
+            vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, waterPipeline);
+            terrainRenderer.drawWater(command, pipelineLayout, camera, editor.scene(),
+                                      [](const ge3d::Transform& transform) { return EditorView::modelMatrix(transform); },
+                                      [&](const std::string& id) { return textures.gpuIndex(id); });
             const auto& terrainStats = terrainRenderer.stats();
             editor.setTerrainStats({terrainStats.terrains, terrainStats.chunks, terrainStats.visibleChunks,
                                     terrainStats.pendingChunks, terrainStats.quads, terrainStats.visibleQuads,
